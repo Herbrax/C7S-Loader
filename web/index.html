@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>C7S-Loader</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<main>
+  <header>
+    <div class="brand">C7S<span>-Loader</span></div>
+    <div class="server" id="server">connecting...</div>
+  </header>
+
+  <section id="drop" class="card drop">
+    <input id="file" type="file" accept=".c7s,.C7S" hidden>
+    <p><strong>Drop a .C7S here</strong> or <button id="browse" class="link">browse</button></p>
+    <p class="muted">Stored in /switch/C7S-Loader on the console.</p>
+    <div id="uploadMsg" class="msg"></div>
+  </section>
+
+  <section class="card">
+    <h2>Payloads</h2>
+    <div id="files" class="files"><p class="muted">Loading...</p></div>
+    <div class="actions"><button id="ktestBtn" class="danger">Test keys (5s)</button></div>
+  </section>
+
+  <section id="confirmPanel" class="card hidden">
+    <h2>Are you sure?</h2>
+    <p id="confirmText"></p>
+    <div class="actions">
+      <button id="startBtn" class="danger big">START</button>
+      <button id="refreshBtn" class="ghost">Refresh</button>
+    </div>
+    <div id="startMsg" class="msg"></div>
+  </section>
+
+  <section id="runPanel" class="card hidden">
+    <h2>Running</h2>
+    <p id="runName"></p>
+    <div class="bar"><div id="barFill"></div></div>
+    <p id="runStep" class="muted"></p>
+    <div class="actions"><button id="cancelBtn" class="danger">Cancel</button></div>
+  </section>
+
+  <section class="card logCard">
+    <h2>USB log</h2>
+    <pre id="usbConsole" class="console"></pre>
+  </section>
+
+  <section class="card logCard">
+    <h2>Run log</h2>
+    <pre id="runConsole" class="console"></pre>
+  </section>
+
+  <section class="card update">
+    <h2>Update app</h2>
+    <p class="muted">Upload a new c7s-loader.nro. The app closes; open it again from hbmenu.</p>
+    <input id="nroFile" type="file" accept=".nro" hidden>
+    <div class="actions">
+      <button id="nroBrowse" class="ghost">Choose .nro</button>
+      <button id="nroUpload" class="danger">Upload and apply</button>
+    </div>
+    <div id="nroMsg" class="msg"></div>
+  </section>
+
+  <section class="card settings">
+    <h2>Settings</h2>
+    <label>Port <input id="port" type="number" min="1" max="65535" value="6969"></label>
+    <button id="savePort" class="ghost">Save and restart</button>
+    <div id="settingsMsg" class="msg"></div>
+  </section>
+</main>
+<script src="/app.js"></script>
+</body>
+</html>

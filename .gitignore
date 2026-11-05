@@ -1,0 +1,9 @@
+.DS_Store
+.deps/
+build/
+kbdtest/build/
+*.nro
+*.elf
+*.nacp
+source/fonts_data.c
+include/web_assets.h

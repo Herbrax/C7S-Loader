@@ -1,0 +1,73 @@
+#include "usb_composite.h"
+
+#include <stdio.h>
+#include <string.h>
+
+#include "usb_keyboard.h"
+
+static UsbCompositeStatus g_status;
+
+Result usb_composite_init(void) {
+    memset(&g_status, 0, sizeof(g_status));
+    Result rc = keyboard_init();
+    if (R_FAILED(rc)) {
+        g_status.error = rc;
+        snprintf(g_status.stage, sizeof(g_status.stage), "%s", keyboard_status()->stage);
+    } else {
+        g_status.initialized = true;
+        snprintf(g_status.stage, sizeof(g_status.stage), "plume keyboard initialized");
+    }
+    return rc;
+}
+
+void usb_composite_poll(uint64_t now_ms) {
+    keyboard_poll(now_ms);
+}
+
+void usb_composite_exit(void) {
+    keyboard_exit();
+    g_status.initialized = false;
+}
+
+const UsbCompositeStatus *usb_composite_status(void) {
+    const KeyboardStatus *k = keyboard_status();
+    g_status.initialized = k->initialized;
+    g_status.configured = k->state == UsbState_Configured;
+    g_status.pad_ready = k->ready;
+    g_status.kbd_ready = k->ready;
+    g_status.pad_pending = false;
+    g_status.kbd_pending = k->transfer_pending;
+    g_status.state = k->state;
+    g_status.error = k->error;
+    snprintf(g_status.stage, sizeof(g_status.stage), "%s", k->stage);
+    g_status.pad_sent = k->reports_completed;
+    g_status.kbd_sent = k->reports_completed;
+    g_status.reports_failed = k->reports_failed;
+    g_status.bus_resets = k->bus_resets;
+    g_status.leds = k->leds;
+    g_status.leds_known = k->leds_known;
+    return &g_status;
+}
+
+bool usb_keyboard_ready(void) { return keyboard_status()->ready; }
+bool usb_gamepad_ready(void) { return keyboard_status()->ready; }
+bool usb_keyboard_pending(void) { return keyboard_status()->transfer_pending; }
+bool usb_gamepad_pending(void) { return false; }
+
+Result usb_send_keyboard(uint8_t modifier, const uint8_t keycode[6], uint64_t now_ms) {
+    const KeyboardStatus *k = keyboard_status();
+    if (!k->ready) return MAKERESULT(Module_Libnx, LibnxError_NotInitialized);
+    if (k->transfer_pending) return 0;
+    return keyboard_send(modifier, keycode[0], now_ms);
+}
+
+Result usb_send_keys(uint8_t modifier, uint8_t key1, uint64_t now_ms) {
+    uint8_t keys[6] = {key1, 0, 0, 0, 0, 0};
+    return usb_send_keyboard(modifier, keys, now_ms);
+}
+
+Result usb_send_gamepad(const C7sPadReport *report, uint64_t now_ms) {
+    (void)report;
+    (void)now_ms;
+    return 0;
+}
