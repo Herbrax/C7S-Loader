@@ -11,10 +11,14 @@
 
 #define EP_DIR_OUT 0x00
 #define EP_DIR_IN  0x80
-#define EP_PAD_OUT 0x02
+/* usb:ds allocates endpoint numbers as interface_index+1 per direction, so
+   interface 0 (gamepad) gets IN 0x81 / OUT 0x01 and interface 1 (keyboard)
+   gets IN 0x82. The keyboard is IN-only; its LEDs arrive over EP0 (SET_REPORT),
+   so there is no keyboard OUT endpoint. This matches the layout the Switch 2
+   accepts for a HORI-identity composite (see RecurCIV / PicoSwitch). */
+#define EP_PAD_OUT 0x01
 #define EP_PAD_IN  0x81
-#define EP_KBD_IN  0x83
-#define EP_KBD_OUT 0x03
+#define EP_KBD_IN  0x82
 
 #define PAD_REPORT_LEN 8
 #define KBD_REPORT_LEN 8
@@ -504,26 +508,40 @@ static Result append_interface(UsbDsInterface *intf, uint8_t num, uint8_t subcla
         .wMaxPacketSize = ep_size,
         .bInterval = 1,
     };
-    const UsbDeviceSpeed speeds[2] = {UsbDeviceSpeed_Full, UsbDeviceSpeed_High};
-    for (unsigned i = 0; i < 2; i++) {
+    /* SuperSpeed endpoint companion (bLength=6, bDescriptorType=0x30/48).
+       bMaxBurst=0, bmAttributes=0, wBytesPerInterval = max packet size. The
+       Switch 2 enumerates at SuperSpeed and will not bring the composite up
+       without a companion on every endpoint. */
+    const uint8_t companion[6] = {6, 48, 0, 0, (uint8_t)(ep_size & 0xFF), (uint8_t)(ep_size >> 8)};
+    const UsbDeviceSpeed speeds[3] = {UsbDeviceSpeed_Full, UsbDeviceSpeed_High, UsbDeviceSpeed_Super};
+    for (unsigned i = 0; i < 3; i++) {
+        UsbDeviceSpeed speed = speeds[i];
+        bool super = (speed == UsbDeviceSpeed_Super);
+        /* 1 ms polling at every speed: bInterval 1 frame at FS, 2^(4-1) microframes at HS/SS. */
+        eo.bInterval = ei.bInterval = (i == 0) ? 1 : 4;
         Result rc;
-        rc = usbDsInterface_AppendConfigurationData(intf, speeds[i], &idesc, sizeof(idesc));
+        rc = usbDsInterface_AppendConfigurationData(intf, speed, &idesc, sizeof(idesc));
         if (R_FAILED(rc)) return rc;
-        rc = usbDsInterface_AppendConfigurationData(intf, speeds[i], hid, 9);
+        rc = usbDsInterface_AppendConfigurationData(intf, speed, hid, 9);
         if (R_FAILED(rc)) return rc;
         if (!has_out) {
-            rc = usbDsInterface_AppendConfigurationData(intf, speeds[i], &ei, sizeof(ei));
+            rc = usbDsInterface_AppendConfigurationData(intf, speed, &ei, sizeof(ei));
             if (R_FAILED(rc)) return rc;
+            if (super && R_FAILED(rc = usbDsInterface_AppendConfigurationData(intf, speed, companion, sizeof(companion)))) return rc;
         } else if (in_first) {
-            rc = usbDsInterface_AppendConfigurationData(intf, speeds[i], &ei, sizeof(ei));
+            rc = usbDsInterface_AppendConfigurationData(intf, speed, &ei, sizeof(ei));
             if (R_FAILED(rc)) return rc;
-            rc = usbDsInterface_AppendConfigurationData(intf, speeds[i], &eo, sizeof(eo));
+            if (super && R_FAILED(rc = usbDsInterface_AppendConfigurationData(intf, speed, companion, sizeof(companion)))) return rc;
+            rc = usbDsInterface_AppendConfigurationData(intf, speed, &eo, sizeof(eo));
             if (R_FAILED(rc)) return rc;
+            if (super && R_FAILED(rc = usbDsInterface_AppendConfigurationData(intf, speed, companion, sizeof(companion)))) return rc;
         } else {
-            rc = usbDsInterface_AppendConfigurationData(intf, speeds[i], &eo, sizeof(eo));
+            rc = usbDsInterface_AppendConfigurationData(intf, speed, &eo, sizeof(eo));
             if (R_FAILED(rc)) return rc;
-            rc = usbDsInterface_AppendConfigurationData(intf, speeds[i], &ei, sizeof(ei));
+            if (super && R_FAILED(rc = usbDsInterface_AppendConfigurationData(intf, speed, companion, sizeof(companion)))) return rc;
+            rc = usbDsInterface_AppendConfigurationData(intf, speed, &ei, sizeof(ei));
             if (R_FAILED(rc)) return rc;
+            if (super && R_FAILED(rc = usbDsInterface_AppendConfigurationData(intf, speed, companion, sizeof(companion)))) return rc;
         }
     }
     return 0;
@@ -605,33 +623,33 @@ Result usb_composite_init(void) {
     };
     STEP("Full Speed descriptor", usbDsSetUsbDeviceDescriptor(UsbDeviceSpeed_Full, &dev));
     STEP("High Speed descriptor", usbDsSetUsbDeviceDescriptor(UsbDeviceSpeed_High, &dev));
+    /* SuperSpeed descriptor (bMaxPacketSize0 is the exponent: 2^9 = 512) plus a
+       BOS descriptor advertising the USB 2.0 + SuperSpeed device capabilities.
+       The Switch 2 port runs at SuperSpeed and needs both, or the composite
+       device never configures. */
+    dev.bcdUSB = 0x0300;
+    dev.bMaxPacketSize0 = 9;
+    STEP("Super Speed descriptor", usbDsSetUsbDeviceDescriptor(UsbDeviceSpeed_Super, &dev));
+    static const uint8_t bos[] = {5, 15, 22, 0, 2, 7, 16, 2, 2, 0, 0, 0, 10, 16, 3, 0, 14, 0, 1, 10, 0xff, 7};
+    STEP("BOS descriptor", usbDsSetBinaryObjectStore(bos, sizeof(bos)));
 
+    /* Register both interfaces first, append all configuration data, then
+       register endpoints in the order gamepad-IN, gamepad-OUT, keyboard-IN so
+       usb:ds hands out the addresses the descriptors above declare. */
     STEP("Gamepad interface 0", usbDsRegisterInterfaceEx(&g_pad.intf, 0));
+    STEP("Keyboard interface 1", usbDsRegisterInterfaceEx(&g_kbd.intf, 1));
+
     STEP("Gamepad configuration", append_interface(g_pad.intf, 0, 0, 0, g_pad.hid_desc,
                                                    EP_PAD_OUT, EP_PAD_IN, 64, false, true));
-    {
-        UsbDsEndpoint *dummy = NULL;
-        rc = usbDsInterface_RegisterEndpoint(g_pad.intf, &dummy, 0x01);
-        if (R_FAILED(rc)) usb_log("dummy OUT allocation failed: 0x%08lx", (unsigned long)rc);
-        rc = 0;
-    }
-    STEP("Gamepad OUT endpoint", usbDsInterface_RegisterEndpoint(g_pad.intf, &g_pad.ep_out, EP_PAD_OUT));
-    STEP("Gamepad IN endpoint", usbDsInterface_RegisterEndpoint(g_pad.intf, &g_pad.ep_in, EP_PAD_IN));
-
-    STEP("Keyboard interface 1", usbDsRegisterInterfaceEx(&g_kbd.intf, 1));
     STEP("Keyboard configuration", append_interface(g_kbd.intf, 1, 1, 1, g_kbd.hid_desc,
-                                                    EP_KBD_OUT, EP_KBD_IN, 8, true, true));
-    {
-        UsbDsEndpoint *dummy = NULL;
-        rc = usbDsInterface_RegisterEndpoint(g_kbd.intf, &dummy, 0x82);
-        if (R_FAILED(rc)) usb_log("dummy IN allocation failed: 0x%08lx", (unsigned long)rc);
-        rc = 0;
-    }
-    STEP("Keyboard IN endpoint", usbDsInterface_RegisterEndpoint(g_kbd.intf, &g_kbd.ep_in, EP_KBD_IN));
-    STEP("Keyboard OUT endpoint", usbDsInterface_RegisterEndpoint(g_kbd.intf, &g_kbd.ep_out, EP_KBD_OUT));
+                                                    0, EP_KBD_IN, 8, false, false));
 
-    STEP("Enable gamepad interface", usbDsInterface_EnableInterface(g_pad.intf));
+    STEP("Gamepad IN endpoint", usbDsInterface_RegisterEndpoint(g_pad.intf, &g_pad.ep_in, EP_PAD_IN));
+    STEP("Gamepad OUT endpoint", usbDsInterface_RegisterEndpoint(g_pad.intf, &g_pad.ep_out, EP_PAD_OUT));
+    STEP("Keyboard IN endpoint", usbDsInterface_RegisterEndpoint(g_kbd.intf, &g_kbd.ep_in, EP_KBD_IN));
+
     STEP("Enable keyboard interface", usbDsInterface_EnableInterface(g_kbd.intf));
+    STEP("Enable gamepad interface", usbDsInterface_EnableInterface(g_pad.intf));
     STEP("Enable USB device", usbDsEnable());
 
 #undef STEP
