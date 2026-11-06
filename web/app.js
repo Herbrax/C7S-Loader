@@ -7,6 +7,11 @@ let pollTimer = null;
 let debugTimer = null;
 let finishedBadge = null;
 let finishedTimer = null;
+let liveOn = false;
+let liveRunning = false;
+let liveMods = 0;
+let livePad = { buttons: 0, hat: 8, lx: 128, ly: 128, rx: 128, ry: 128 };
+const LIVE_HAT_NONE = 8;
 
 function fmtSize(n) {
   if (n < 1024) return n + " B";
@@ -56,17 +61,29 @@ function renderFiles() {
     meta.className = "meta";
     if (f.header) {
       meta.textContent = f.title + " - " + f.declared + " lines" +
-        (f.mismatch ? " (file has " + f.lines + ")" : "");
+        (f.mismatch ? " (file has " + f.lines + ")" : "") +
+        (f.plain ? " - line mode" : " - Civ 7 chat");
     } else {
-      meta.textContent = "header not recognised - " + f.lines + " lines";
+      meta.textContent = "header not recognised - " + f.lines + " lines" +
+        (f.plain ? " - line mode" : "");
     }
     left.appendChild(name);
     left.appendChild(meta);
     const size = document.createElement("div");
     size.className = "size";
     size.textContent = fmtSize(f.size);
+    const dl = document.createElement("a");
+    dl.className = "download";
+    dl.href = "/api/download?name=" + encodeURIComponent(f.name);
+    dl.download = f.name;
+    dl.textContent = "Download";
+    dl.addEventListener("click", (ev) => ev.stopPropagation());
+    const right = document.createElement("div");
+    right.className = "fileRight";
+    right.appendChild(size);
+    right.appendChild(dl);
     row.appendChild(left);
-    row.appendChild(size);
+    row.appendChild(right);
     row.addEventListener("click", () => selectFile(f.name));
     box.appendChild(row);
   }
@@ -102,6 +119,7 @@ function selectFile(name) {
   } else {
     parts.push("Payload header not recognised (" + f.lines + " lines).");
   }
+  parts.push(f.plain ? "Writing mode: plain keyboard lines (no gamepad)." : "Writing mode: Civ 7 chat (Esc + gamepad A).");
   parts.push("This will type the payload into the other console.");
   $("confirmText").textContent = parts.join(" ");
   setMsg($("startMsg"), "", "");
@@ -198,6 +216,10 @@ function updateState(s) {
   $("server").textContent = (s.ip && s.ip !== "unknown" ? s.ip : location.hostname) + ":" + s.port;
   if (document.activeElement !== $("port")) $("port").value = s.port;
 
+  liveRunning = !!s.running;
+  if (liveRunning && !(prev && prev.running)) resetLiveState();
+  setLiveControls();
+
   const running = !!s.running;
 
   $("runPanel").classList.toggle("hidden", !running);
@@ -277,6 +299,259 @@ async function savePort() {
   }
 }
 
+function neutralPad() {
+  return { buttons: 0, hat: LIVE_HAT_NONE, lx: 128, ly: 128, rx: 128, ry: 128 };
+}
+
+function liveSetKey(mod, key) {
+  if (!liveOn || liveRunning) return;
+  liveFetch("/api/live/key?mod=" + mod + "&key=" + key);
+}
+
+function sendPad() {
+  if (!liveOn || liveRunning) return;
+  const p = livePad;
+  liveFetch("/api/live/pad?buttons=" + p.buttons + "&hat=" + p.hat +
+    "&lx=" + p.lx + "&ly=" + p.ly + "&rx=" + p.rx + "&ry=" + p.ry);
+}
+
+async function liveFetch(path) {
+  if (!liveOn || liveRunning) return;
+  try {
+    await jsonFetch(path, { method: "POST" });
+  } catch (e) {
+    setMsg($("liveMsg"), "Live input: " + e.message, "err");
+  }
+}
+
+function setLiveControls() {
+  const disabled = !liveOn || liveRunning;
+  for (const el of document.querySelectorAll(".liveControl")) el.disabled = disabled;
+  const en = $("liveEnable");
+  if (en) en.disabled = liveRunning;
+  const st = $("liveState");
+  if (st) st.textContent = liveRunning ? "paused" : (liveOn ? "on" : "off");
+}
+
+function updateModButtons() {
+  for (const b of document.querySelectorAll(".mod")) {
+    const bit = parseInt(b.dataset.mod, 10) || 0;
+    b.classList.toggle("active", !!(liveMods & bit));
+  }
+}
+
+function resetLiveState() {
+  liveMods = 0;
+  livePad = neutralPad();
+  for (const el of document.querySelectorAll(".liveControl.active")) el.classList.remove("active");
+  updateModButtons();
+}
+
+function releaseAllLive() {
+  resetLiveState();
+  if (liveOn && !liveRunning) liveFetch("/api/live?release=1");
+  setLiveControls();
+}
+
+async function enableLive(on) {
+  try {
+    const d = await jsonFetch("/api/live?on=" + (on ? 1 : 0), { method: "POST" });
+    liveOn = !!d.enabled;
+    setMsg($("liveMsg"), liveOn ? "Live input enabled." : "Live input off.", liveOn ? "ok" : "");
+  } catch (e) {
+    liveOn = false;
+    setMsg($("liveMsg"), "Cannot enable live input: " + e.message, "err");
+  }
+  $("liveEnable").checked = liveOn;
+  if (!liveOn) resetLiveState();
+  setLiveControls();
+}
+
+function bindKeyButton(btn, key) {
+  btn.addEventListener("pointerdown", (e) => {
+    if (!liveOn || liveRunning) return;
+    e.preventDefault();
+    try { btn.setPointerCapture(e.pointerId); } catch (err) {}
+    btn.classList.add("active");
+    liveSetKey(liveMods, key);
+  });
+  const up = () => {
+    if (!btn.classList.contains("active")) return;
+    btn.classList.remove("active");
+    liveSetKey(liveMods, 0);
+  };
+  btn.addEventListener("pointerup", up);
+  btn.addEventListener("pointercancel", up);
+  btn.addEventListener("lostpointercapture", up);
+}
+
+function bindShortcut(btn, mod, key) {
+  let down = false;
+  let started = 0;
+  btn.addEventListener("pointerdown", (e) => {
+    if (!liveOn || liveRunning || down) return;
+    e.preventDefault();
+    try { btn.setPointerCapture(e.pointerId); } catch (err) {}
+    down = true;
+    started = performance.now();
+    btn.classList.add("active");
+    liveSetKey(mod, key);
+  });
+  const up = () => {
+    if (!down) return;
+    down = false;
+    const wait = Math.max(0, 80 - (performance.now() - started));
+    setTimeout(() => {
+      btn.classList.remove("active");
+      liveSetKey(liveMods, 0);
+    }, wait);
+  };
+  btn.addEventListener("pointerup", up);
+  btn.addEventListener("pointercancel", up);
+  btn.addEventListener("lostpointercapture", up);
+}
+
+function bindPadButton(btn, bit) {
+  let down = false;
+  btn.addEventListener("pointerdown", (e) => {
+    if (!liveOn || liveRunning || down) return;
+    e.preventDefault();
+    try { btn.setPointerCapture(e.pointerId); } catch (err) {}
+    down = true;
+    btn.classList.add("active");
+    livePad.buttons |= bit;
+    sendPad();
+  });
+  const up = () => {
+    if (!down) return;
+    down = false;
+    btn.classList.remove("active");
+    livePad.buttons &= ~bit;
+    sendPad();
+  };
+  btn.addEventListener("pointerup", up);
+  btn.addEventListener("pointercancel", up);
+  btn.addEventListener("lostpointercapture", up);
+}
+
+function bindHatButton(btn, hat) {
+  let down = false;
+  btn.addEventListener("pointerdown", (e) => {
+    if (!liveOn || liveRunning || down) return;
+    e.preventDefault();
+    try { btn.setPointerCapture(e.pointerId); } catch (err) {}
+    down = true;
+    btn.classList.add("active");
+    livePad.hat = hat;
+    sendPad();
+  });
+  const up = () => {
+    if (!down) return;
+    down = false;
+    btn.classList.remove("active");
+    livePad.hat = LIVE_HAT_NONE;
+    sendPad();
+  };
+  btn.addEventListener("pointerup", up);
+  btn.addEventListener("pointercancel", up);
+  btn.addEventListener("lostpointercapture", up);
+}
+
+function padButton(label, bit) {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "liveControl key";
+  b.textContent = label;
+  bindPadButton(b, bit);
+  return b;
+}
+
+function initLive() {
+  const rows = [
+    [{l:"`",k:53},{l:"1",k:30},{l:"2",k:31},{l:"3",k:32},{l:"4",k:33},{l:"5",k:34},{l:"6",k:35},{l:"7",k:36},{l:"8",k:37},{l:"9",k:38},{l:"0",k:39},{l:"-",k:45},{l:"=",k:46},{l:"Back",k:42,wide:true}],
+    [{l:"Tab",k:43,wide:true},{l:"q",k:20},{l:"w",k:26},{l:"e",k:8},{l:"r",k:21},{l:"t",k:23},{l:"y",k:28},{l:"u",k:24},{l:"i",k:12},{l:"o",k:18},{l:"p",k:19},{l:"[",k:47},{l:"]",k:48},{l:"\\",k:49}],
+    [{l:"Esc",k:41,wide:true},{l:"a",k:4},{l:"s",k:22},{l:"d",k:7},{l:"f",k:9},{l:"g",k:10},{l:"h",k:11},{l:"j",k:13},{l:"k",k:14},{l:"l",k:15},{l:";",k:51},{l:"'",k:52},{l:"Enter",k:40,wide:true}],
+    [{l:"z",k:29},{l:"x",k:27},{l:"c",k:6},{l:"v",k:25},{l:"b",k:5},{l:"n",k:17},{l:"m",k:16},{l:",",k:54},{l:".",k:55},{l:"/",k:56},{l:"Up",k:82},{l:"Left",k:80},{l:"Down",k:81},{l:"Right",k:79}],
+    [{l:"Space",k:44,wide:true}]
+  ];
+  const kb = $("liveKeyboard");
+  for (const row of rows) {
+    const r = document.createElement("div");
+    r.className = "krow";
+    for (const item of row) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "liveControl key" + (item.wide ? " wide" : "");
+      b.textContent = item.l;
+      b.dataset.key = item.k;
+      bindKeyButton(b, item.k);
+      r.appendChild(b);
+    }
+    kb.appendChild(r);
+  }
+
+  for (const b of document.querySelectorAll(".mod")) {
+    b.addEventListener("click", () => {
+      if (!liveOn || liveRunning) return;
+      const bit = parseInt(b.dataset.mod, 10) || 0;
+      liveMods ^= bit;
+      b.classList.toggle("active", !!(liveMods & bit));
+      liveSetKey(liveMods, 0);
+    });
+  }
+
+  for (const b of document.querySelectorAll(".shortcut")) {
+    const parts = b.dataset.shortcut.split(",").map(Number);
+    bindShortcut(b, parts[0], parts[1]);
+  }
+
+  const dpad = [
+    { label: "\u25B2", hat: 0, cls: "up" },
+    { label: "\u25C0", hat: 2, cls: "left" },
+    { label: "\u25B6", hat: 6, cls: "right" },
+    { label: "\u25BC", hat: 4, cls: "down" }
+  ];
+  for (const d of dpad) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "liveControl key " + d.cls;
+    b.textContent = d.label;
+    bindHatButton(b, d.hat);
+    $("liveDpad").appendChild(b);
+  }
+
+  const face = [["X", 8], ["Y", 1], ["A", 4], ["B", 2]];
+  for (const [label, bit] of face) $("liveFace").appendChild(padButton(label, bit));
+
+  const shoulders = [["L", 16], ["ZL", 64], ["R", 32], ["ZR", 128]];
+  for (const [label, bit] of shoulders) $("liveShoulders").appendChild(padButton(label, bit));
+
+  const system = [["-", 256], ["+", 512], ["L3", 1024], ["R3", 2048], ["Home", 4096], ["Capture", 8192]];
+  for (const [label, bit] of system) $("liveSystem").appendChild(padButton(label, bit));
+
+  $("liveEnable").addEventListener("change", () => enableLive($("liveEnable").checked));
+  $("liveRelease").addEventListener("click", releaseAllLive);
+  window.addEventListener("beforeunload", () => {
+    if (liveOn && !liveRunning) {
+      try { navigator.sendBeacon("/api/live?release=1"); } catch (err) {}
+    }
+  });
+  setLiveControls();
+}
+
+async function loadLive() {
+  try {
+    const d = await jsonFetch("/api/live");
+    liveOn = !!d.enabled;
+  } catch (e) {
+    liveOn = false;
+  }
+  const en = $("liveEnable");
+  if (en) en.checked = liveOn;
+  if (liveOn) liveFetch("/api/live?release=1");
+  setLiveControls();
+}
+
 function wire() {
   $("browse").addEventListener("click", () => $("file").click());
   $("file").addEventListener("change", () => upload($("file").files[0]));
@@ -308,6 +583,8 @@ function wire() {
 
 async function boot() {
   wire();
+  initLive();
+  await loadLive();
   await poll();
   await refreshFiles();
   const s = lastState;

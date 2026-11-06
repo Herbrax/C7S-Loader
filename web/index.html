@@ -44,6 +44,42 @@
     <div class="actions"><button id="cancelBtn" class="danger">Cancel</button></div>
   </section>
 
+  <section class="card liveCard">
+    <div class="liveHead">
+      <h2>Live input</h2>
+      <span id="liveState" class="liveState">off</span>
+      <label class="check"><input id="liveEnable" type="checkbox"> Enable</label>
+    </div>
+    <p class="muted">Press and hold on-screen keys or gamepad buttons. Shortcuts send the combo once.</p>
+    <div class="shortcuts">
+      <button type="button" class="liveControl shortcut" data-shortcut="4,42">Alt+Backspace</button>
+      <button type="button" class="liveControl shortcut" data-shortcut="4,40">Alt+Enter</button>
+      <button type="button" class="liveControl shortcut" data-shortcut="4,41">Alt+Esc</button>
+    </div>
+    <div class="liveCols">
+      <div class="liveGroup">
+        <h3>Keyboard</h3>
+        <div class="mods">
+          <button type="button" class="liveControl key mod" data-mod="4">Alt</button>
+          <button type="button" class="liveControl key mod" data-mod="1">Ctrl</button>
+          <button type="button" class="liveControl key mod" data-mod="2">Shift</button>
+        </div>
+        <div id="liveKeyboard" class="keyboard"></div>
+      </div>
+      <div class="liveGroup">
+        <h3>Gamepad</h3>
+        <div class="padTop">
+          <div id="liveDpad" class="dpad"></div>
+          <div id="liveFace" class="face"></div>
+        </div>
+        <div id="liveShoulders" class="padRow"></div>
+        <div id="liveSystem" class="padRow"></div>
+      </div>
+    </div>
+    <div class="actions"><button type="button" id="liveRelease" class="ghost liveControl">Release all</button></div>
+    <div id="liveMsg" class="msg"></div>
+  </section>
+
   <section class="card logCard">
     <h2>USB log</h2>
     <pre id="usbConsole" class="console"></pre>

@@ -12,9 +12,12 @@
 
 extern "C" {
 #include "app.h"
+#include "carry.h"
 #include "c7s.h"
 #include "httpd.h"
 #include "library.h"
+#include "live.h"
+#include "record.h"
 #include "settings.h"
 #include "update.h"
 #include "switch_init.h"
@@ -286,7 +289,9 @@ struct Rect {
 struct Input {
     bool up = false, down = false, left = false, right = false;
     bool a = false, b = false, x = false, y = false, plus = false, minus = false;
+    bool plus_held = false;
     bool touch = false;
+    bool touch_down = false, touch_up = false, touch_held = false;
     float tx = 0, ty = 0;
 };
 
@@ -295,7 +300,7 @@ struct Hint {
     const char *text;
 };
 
-enum Screen { SCREEN_HOME, SCREEN_CONFIRM, SCREEN_RUNNING, SCREEN_RESULT, SCREEN_SETTINGS };
+enum Screen { SCREEN_HOME, SCREEN_CONFIRM, SCREEN_RUNNING, SCREEN_RESULT, SCREEN_SETTINGS, SCREEN_LIVE };
 
 NWindow *g_win = nullptr;
 Framebuffer g_fb;
@@ -305,6 +310,7 @@ bool g_touch_ready = false;
 uint64_t g_last_frame = 0;
 uint64_t g_prev_buttons = 0;
 bool g_prev_touch = false;
+uint64_t g_plus_start = 0;
 
 Screen g_screen = SCREEN_HOME;
 int g_confirm_focus = 0;
@@ -324,6 +330,23 @@ Rect g_port_rect;
 Rect g_cancel_rect;
 Rect g_change_rect;
 Rect g_back_rect;
+Rect g_live_rect;
+
+enum LiveKind { LK_KEY, LK_MOD, LK_PAD, LK_HAT, LK_SHORTCUT, LK_CARRY, LK_RELEASE, LK_BACK, LK_RECORD, LK_EXIT };
+struct LiveKey {
+    Rect r;
+    const char *label;
+    LiveKind kind;
+    uint8_t mod;
+    uint8_t key;
+    uint16_t bit;
+    uint8_t hat;
+};
+LiveKey g_live_keys[96];
+int g_live_key_count = 0;
+int g_live_active = -1;
+uint8_t g_live_mods = 0;
+C7sPadReport g_live_pad;
 
 uint64_t ticks_ms() { return armTicksToNs(armGetSystemTick()) / 1000000ull; }
 
@@ -424,17 +447,22 @@ Input poll_input() {
     in.x = (down & HidNpadButton_X) != 0;
     in.y = (down & HidNpadButton_Y) != 0;
     in.plus = (down & HidNpadButton_Plus) != 0;
+    in.plus_held = (cur & HidNpadButton_Plus) != 0;
     in.minus = (down & HidNpadButton_Minus) != 0;
 
     HidTouchScreenState ts{};
-    if (g_touch_ready && hidGetTouchScreenStates(&ts, 1) && ts.count > 0) {
+    bool has_touch = g_touch_ready && hidGetTouchScreenStates(&ts, 1) && ts.count > 0;
+    if (has_touch) {
         in.touch = !g_prev_touch;
+        in.touch_down = in.touch;
+        in.touch_held = true;
         in.tx = (float)ts.touches[0].x * (W / 1280.0f);
         in.ty = (float)ts.touches[0].y * (H / 720.0f);
-        g_prev_touch = true;
     } else {
-        g_prev_touch = false;
+        in.touch_up = g_prev_touch;
     }
+    g_prev_touch = has_touch;
+    carry_update_pad(&g_pad);
     return in;
 }
 
@@ -640,6 +668,16 @@ void draw_home(const C7sAppSnapshot &s, const UsbCompositeStatus *u) {
                    g_port_rect.y + (g_port_rect.h - pts.y) / 2, 24, draw::TEXT, "Change port", true);
         y += 62;
 
+        g_live_rect = {x, y, 210, 46};
+        draw::rect(g_live_rect.x, g_live_rect.y, g_live_rect.w, g_live_rect.h, draw::PANEL2, 10);
+        draw::frame(g_live_rect.x, g_live_rect.y, g_live_rect.w, g_live_rect.h,
+                    carry_enabled() ? draw::ACCENT : draw::LINE, 10, 1.5f);
+        ImVec2 lts = draw::text_size(24, "Live input", true);
+        draw::text(g_live_rect.x + (g_live_rect.w - lts.x) / 2,
+                   g_live_rect.y + (g_live_rect.h - lts.y) / 2, 24,
+                   carry_enabled() ? draw::ACCENT : draw::TEXT, "Live input", true);
+        y += 62;
+
         bool usb_ok = u && u->initialized && u->pad_ready && u->kbd_ready;
         if (!usb_ok) {
             draw::rect(x, y, SIDE_W - 48, 100, draw::PANEL2, 12);
@@ -666,7 +704,7 @@ void draw_home(const C7sAppSnapshot &s, const UsbCompositeStatus *u) {
     }
 
     Hint hints[] = {{ACT_CROSS, "Start"}, {ACT_TRIANGLE, "Refresh"}, {ACT_SQUARE, "Port"},
-                    {ACT_TOUCHPAD, "Test keys"}, {ACT_OPTIONS, "Exit"}};
+                    {ACT_TOUCHPAD, "Test keys"}, {ACT_OPTIONS, "Hold + to exit"}};
     draw_bottom(hints, 5);
 }
 
@@ -750,7 +788,7 @@ void draw_running(const C7sAppSnapshot &s, const UsbCompositeStatus *u) {
     draw::red_button(bx2, by2, bw2, bh2, "CANCEL", true);
     g_cancel_rect = {bx2, by2, bw2, bh2};
 
-    Hint hints[] = {{ACT_CIRCLE, "Cancel"}, {ACT_OPTIONS, "Exit"}};
+    Hint hints[] = {{ACT_CIRCLE, "Cancel"}, {ACT_OPTIONS, "Hold + to exit"}};
     draw_bottom(hints, 2);
 }
 
@@ -819,6 +857,171 @@ void draw_settings(const C7sAppSnapshot &s, const UsbCompositeStatus *u) {
     draw_bottom(hints, 2);
 }
 
+void live_neutral() {
+    memset(&g_live_pad, 0, sizeof(g_live_pad));
+    g_live_pad.hat = SWITCH_HAT_NOTHING;
+    g_live_pad.lx = g_live_pad.ly = g_live_pad.rx = g_live_pad.ry = SWITCH_STICK_MID;
+}
+
+void live_add(float x, float y, float w, float h, const char *label, LiveKind kind,
+              uint8_t mod = 0, uint8_t key = 0, uint16_t bit = 0,
+              uint8_t hat = SWITCH_HAT_NOTHING) {
+    if (g_live_key_count >= (int)(sizeof(g_live_keys) / sizeof(g_live_keys[0]))) return;
+    g_live_keys[g_live_key_count++] = LiveKey{Rect{x, y, w, h}, label, kind, mod, key, bit, hat};
+}
+
+void leave_live() {
+    live_release_all();
+    live_set_enabled(false);
+    g_screen = SCREEN_HOME;
+}
+
+void enter_live() {
+    live_set_enabled(true);
+    live_release_all();
+    g_live_mods = 0;
+    g_live_active = -1;
+    live_neutral();
+    live_set_pad(&g_live_pad);
+    g_screen = SCREEN_LIVE;
+}
+
+void live_key_release() {
+    if (g_live_active < 0) return;
+    const LiveKey &k = g_live_keys[g_live_active];
+    if (k.kind == LK_KEY || k.kind == LK_SHORTCUT) {
+        live_set_key(g_live_mods, 0);
+    } else if (k.kind == LK_PAD) {
+        g_live_pad.buttons &= (uint16_t)~k.bit;
+        live_set_pad(&g_live_pad);
+    } else if (k.kind == LK_HAT) {
+        g_live_pad.hat = SWITCH_HAT_NOTHING;
+        live_set_pad(&g_live_pad);
+    }
+    g_live_active = -1;
+}
+
+void live_key_press(int i) {
+    const LiveKey &k = g_live_keys[i];
+    switch (k.kind) {
+        case LK_KEY:
+            g_live_active = i;
+            live_set_key(g_live_mods, k.key);
+            break;
+        case LK_MOD:
+            g_live_mods ^= k.mod;
+            live_set_key(g_live_mods, 0);
+            break;
+        case LK_PAD:
+            g_live_active = i;
+            g_live_pad.buttons |= k.bit;
+            live_set_pad(&g_live_pad);
+            break;
+        case LK_HAT:
+            g_live_active = i;
+            g_live_pad.hat = k.hat;
+            live_set_pad(&g_live_pad);
+            break;
+        case LK_SHORTCUT:
+            g_live_active = i;
+            live_set_key(k.mod, k.key);
+            break;
+        case LK_CARRY:
+            carry_set_enabled(!carry_enabled());
+            break;
+        case LK_RELEASE:
+            live_release_all();
+            g_live_mods = 0;
+            live_neutral();
+            live_set_pad(&g_live_pad);
+            g_live_active = -1;
+            break;
+        case LK_BACK:
+            leave_live();
+            break;
+        case LK_RECORD:
+            set_toast(record_toggle() ? "Recording presses..." : "Recording saved");
+            break;
+        case LK_EXIT:
+            g_quit = true;
+            break;
+    }
+}
+
+void draw_live_key(const LiveKey &k, int i) {
+    bool active = (i == g_live_active) ||
+                  (k.kind == LK_MOD && (g_live_mods & k.mod) != 0) ||
+                  (k.kind == LK_CARRY && carry_enabled()) ||
+                  (k.kind == LK_RECORD && record_active());
+    draw::rect(k.r.x, k.r.y, k.r.w, k.r.h, active ? draw::SEL : draw::PANEL2, 10);
+    draw::frame(k.r.x, k.r.y, k.r.w, k.r.h, active ? draw::ACCENT : draw::LINE, 10,
+                active ? 2.0f : 1.2f);
+    float fs = k.label[0] && strlen(k.label) > 8 ? 15.0f : 19.0f;
+    ImVec2 ts = draw::text_size(fs, k.label, true);
+    if (ts.x > k.r.w - 8) {
+        draw::text_clip(k.r.x + 4, k.r.y + (k.r.h - ts.y) / 2, fs,
+                        active ? draw::ACCENT : draw::TEXT, k.label, k.r.w - 8, true);
+    } else {
+        draw::text(k.r.x + (k.r.w - ts.x) / 2, k.r.y + (k.r.h - ts.y) / 2, fs,
+                   active ? draw::ACCENT : draw::TEXT, k.label, true);
+    }
+}
+
+void draw_live(const C7sAppSnapshot &s, const UsbCompositeStatus *u) {
+    draw_top(s, u);
+    g_live_key_count = 0;
+
+    draw::panel(LIST_X, LIST_Y, LIST_W, LIST_H);
+    draw::text(LIST_X + 24, LIST_Y + 18, 28, draw::MUTED, "LIVE KEYBOARD", true);
+    draw::text(LIST_X + 24, LIST_Y + 48, 20, draw::MUTED, "Tap keys; hold gamepad buttons.");
+
+    const float kx = LIST_X + 18.0f;
+    const float ky = LIST_Y + 78.0f;
+    const float kw = (LIST_W - 36.0f - 15.0f * 6.0f) / 16.0f;
+    const float kh = 54.0f;
+    const float kg = 6.0f;
+
+    static const char *r1l[] = {"`", "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "=", "Back"};
+    static const uint8_t r1k[] = {53, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 45, 46, 42};
+    static const char *r2l[] = {"Tab", "q", "w", "e", "r", "t", "y", "u", "i", "o", "p", "[", "]", "\\"};
+    static const uint8_t r2k[] = {43, 20, 26, 8, 21, 23, 28, 24, 12, 18, 19, 47, 48, 49};
+    static const char *r3l[] = {"Esc", "a", "s", "d", "f", "g", "h", "j", "k", "l", ";", "'", "Enter", ""};
+    static const uint8_t r3k[] = {41, 4, 22, 7, 9, 10, 11, 13, 14, 15, 51, 52, 40, 0};
+    static const char *r4l[] = {"z", "x", "c", "v", "b", "n", "m", ",", ".", "/", "Up", "Left", "Down", "Right"};
+    static const uint8_t r4k[] = {29, 27, 6, 25, 5, 17, 16, 54, 55, 56, 82, 80, 81, 79};
+
+    auto row = [&](const char *labels[], const uint8_t keys[], int n, float y) {
+        for (int i = 0; i < n; i++) {
+            if (!labels[i][0]) continue;
+            live_add(kx + i * (kw + kg), y, kw, kh, labels[i], LK_KEY, 0, keys[i]);
+        }
+    };
+    row(r1l, r1k, 14, ky);
+    row(r2l, r2k, 14, ky + (kh + kg));
+    row(r3l, r3k, 13, ky + 2 * (kh + kg));
+    row(r4l, r4k, 14, ky + 3 * (kh + kg));
+
+    float y5 = ky + 4 * (kh + kg);
+    live_add(kx, y5, kw * 6 + 5 * kg, kh, "Space", LK_KEY, 0, 44);
+    live_add(kx + 6 * (kw + kg), y5, kw * 2 + kg, kh, "Alt", LK_MOD, 4);
+    live_add(kx + 8 * (kw + kg), y5, kw * 2 + kg, kh, "Ctrl", LK_MOD, 1);
+    live_add(kx + 10 * (kw + kg), y5, kw * 2 + kg, kh, "Shift", LK_MOD, 2);
+    live_add(kx + 12 * (kw + kg), y5, kw * 4 + 3 * kg, kh, "Release all", LK_RELEASE);
+
+    draw::panel(SIDE_X, SIDE_Y, SIDE_W, SIDE_H);
+    draw::text(SIDE_X + 24, SIDE_Y + 18, 28, draw::MUTED, "LIVE INPUT", true);
+    live_add(SIDE_X + 24, SIDE_Y + 52, SIDE_W - 48, 64, "Carry joycons controls", LK_CARRY);
+    live_add(SIDE_X + 24, SIDE_Y + 132, SIDE_W - 48, 64,
+             record_active() ? "Stop recording" : "Record presses", LK_RECORD);
+    live_add(SIDE_X + 24, SIDE_Y + 212, 210, 64, "Back", LK_BACK);
+    live_add(SIDE_X + 246, SIDE_Y + 212, 210, 64, "Exit", LK_EXIT);
+
+    for (int i = 0; i < g_live_key_count; i++) draw_live_key(g_live_keys[i], i);
+
+    Hint hints[] = {{ACT_CIRCLE, "Back"}, {ACT_OPTIONS, "Hold + to exit"}};
+    draw_bottom(hints, 2);
+}
+
 void start_selected() {
     const UsbCompositeStatus *u = usb_composite_status();
     if (!u->initialized) {
@@ -845,7 +1048,6 @@ void handle_input(const Input &in, const C7sAppSnapshot &s) {
                 app_request_ktest();
                 set_toast("Test keys in 5s - focus a text field");
             }
-            if (in.plus) g_quit = true;
             if (in.touch) {
                 for (int i = 0; i < g_count; i++) {
                     if (g_row_rects[i].hit(in.tx, in.ty)) g_cursor = i;
@@ -853,6 +1055,7 @@ void handle_input(const Input &in, const C7sAppSnapshot &s) {
                 if (g_start_rect.hit(in.tx, in.ty) && g_count > 0) { g_confirm_focus = 0; g_screen = SCREEN_CONFIRM; }
                 if (g_refresh_rect.hit(in.tx, in.ty)) refresh_entries(false);
                 if (g_port_rect.hit(in.tx, in.ty)) g_screen = SCREEN_SETTINGS;
+                if (g_live_rect.hit(in.tx, in.ty)) enter_live();
             }
             break;
         case SCREEN_CONFIRM:
@@ -869,10 +1072,6 @@ void handle_input(const Input &in, const C7sAppSnapshot &s) {
             break;
         case SCREEN_RUNNING:
             if (in.b) app_request_cancel();
-            if (in.plus) {
-                app_request_cancel();
-                g_quit = true;
-            }
             if (in.touch && g_cancel_rect.hit(in.tx, in.ty)) app_request_cancel();
             break;
         case SCREEN_RESULT:
@@ -880,6 +1079,18 @@ void handle_input(const Input &in, const C7sAppSnapshot &s) {
                 g_screen = SCREEN_HOME;
                 refresh_entries(false);
             }
+            break;
+        case SCREEN_LIVE:
+            if (in.touch_down) {
+                for (int i = 0; i < g_live_key_count; i++) {
+                    if (g_live_keys[i].r.hit(in.tx, in.ty)) {
+                        live_key_press(i);
+                        break;
+                    }
+                }
+            }
+            if (in.touch_up) live_key_release();
+            if (in.b) leave_live();
             break;
         case SCREEN_SETTINGS:
             if (in.a || (in.touch && g_change_rect.hit(in.tx, in.ty))) {
@@ -943,6 +1154,22 @@ extern "C" int c7s_ui_run(void) {
         if (ticks_ms() - g_last_refresh > 2000) refresh_entries(false);
 
         Input in = poll_input();
+        if (carry_enabled()) {
+            in.up = in.down = in.left = in.right = false;
+            in.a = in.x = in.y = false;
+            in.minus = false;
+        }
+        if (in.plus_held) {
+            if (g_plus_start == 0) {
+                g_plus_start = ticks_ms();
+            } else if (ticks_ms() - g_plus_start >= 2000) {
+                g_plus_start = 0;
+                if (s.running) app_request_cancel();
+                g_quit = true;
+            }
+        } else {
+            g_plus_start = 0;
+        }
         handle_input(in, s);
 
         frame_begin();
@@ -952,6 +1179,7 @@ extern "C" int c7s_ui_run(void) {
             case SCREEN_RUNNING: draw_running(s, u); break;
             case SCREEN_RESULT: draw_result(s, u); break;
             case SCREEN_SETTINGS: draw_settings(s, u); break;
+            case SCREEN_LIVE: draw_live(s, u); break;
         }
         draw_toast();
         frame_end();

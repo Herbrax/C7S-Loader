@@ -130,7 +130,7 @@ bool c7s_parse_file(const char *path, C7sPayload *out) {
     int body_count = 0;
     for (int i = first_body; i < raw_count; i++) {
         if (is_end_marker(raw[i])) break;
-        if (raw[i][0] != '\0') body_count++;
+        body_count++;
     }
     char **lines = malloc((size_t)(body_count ? body_count : 1) * sizeof(char *));
     if (!lines) {
@@ -143,13 +143,22 @@ bool c7s_parse_file(const char *path, C7sPayload *out) {
     int n = 0;
     for (int i = first_body; i < raw_count; i++) {
         if (is_end_marker(raw[i])) break;
-        if (raw[i][0] != '\0') lines[n++] = raw[i];
+        lines[n++] = raw[i];
     }
     free(raw);
 
     out->lines = lines;
     out->line_count = n;
     if (out->header_valid && out->declared_count != out->line_count) out->count_mismatch = true;
+
+    out->script = out->line_count > 0 && out->lines[0][0] == '@';
+    out->plain = true;
+    if (out->script) out->plain = false;
+    if (out->header_valid && strstr(out->title, "Remote JS") != NULL) out->plain = false;
+    if (out->line_count > 0 &&
+        (strstr(out->lines[0], "onerror") != NULL || strstr(out->lines[0], "p=window.p") != NULL)) {
+        out->plain = false;
+    }
     return true;
 }
 

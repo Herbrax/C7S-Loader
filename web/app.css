@@ -111,6 +111,9 @@ h2 {
 .file .name { font-weight: 600; word-break: break-all; }
 .file .meta { color: var(--muted); font-size: 12px; }
 .file .size { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.fileRight { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
+.file .download { color: var(--accent); font-size: 12px; text-decoration: none; }
+.file .download:hover { text-decoration: underline; }
 
 .actions { display: flex; gap: 10px; align-items: center; margin-top: 14px; flex-wrap: wrap; }
 
@@ -262,3 +265,128 @@ button.big {
 }
 .badge.ok { background: rgba(60, 207, 145, .16); color: var(--green); }
 .badge.err { background: rgba(255, 107, 107, .16); color: var(--red-2); }
+
+.liveHead {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.liveHead h2 { margin: 0; }
+.liveHead .check { margin-left: auto; }
+
+.liveState {
+  font: 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: .8px;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.shortcuts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0 16px;
+}
+
+.shortcuts .shortcut { border-color: #3b4a5e; }
+
+.liveCols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 18px;
+}
+
+.liveGroup h3 {
+  margin: 0 0 8px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+  color: var(--muted);
+}
+
+.mods {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.keyboard { display: grid; gap: 6px; }
+.krow { display: flex; gap: 6px; }
+
+.key {
+  min-width: 34px;
+  padding: 8px 6px;
+  text-align: center;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+}
+
+.key.wide { min-width: 58px; }
+
+.liveControl.active,
+.key.active,
+.mod.active,
+.shortcut.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+
+.liveControl:disabled {
+  opacity: .35;
+  cursor: default;
+}
+
+.padTop {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.dpad {
+  display: grid;
+  grid-template-columns: repeat(3, 40px);
+  grid-template-rows: repeat(3, 40px);
+  gap: 4px;
+}
+
+.dpad .key {
+  min-width: 40px;
+  height: 40px;
+  padding: 0;
+}
+
+.dpad .up { grid-area: 1 / 2; }
+.dpad .left { grid-area: 2 / 1; }
+.dpad .right { grid-area: 2 / 3; }
+.dpad .down { grid-area: 3 / 2; }
+
+.face {
+  display: grid;
+  grid-template-columns: repeat(2, 48px);
+  grid-template-rows: repeat(2, 48px);
+  gap: 6px;
+}
+
+.face .key {
+  min-width: 48px;
+  height: 48px;
+  padding: 0;
+}
+
+.padRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.padRow .key { min-width: 44px; }
+
+@media (max-width: 700px) {
+  .liveCols { grid-template-columns: 1fr; }
+  .liveHead { flex-wrap: wrap; }
+}
