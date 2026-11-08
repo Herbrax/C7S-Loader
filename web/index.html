@@ -7,107 +7,156 @@
 <link rel="stylesheet" href="/app.css">
 </head>
 <body>
-<main>
-  <header>
-    <div class="brand">C7S<span>-Loader</span></div>
-    <div class="server" id="server">connecting...</div>
-  </header>
+<header>
+  <div class="brand">C7S<span>-Loader</span></div>
+  <nav>
+    <button class="tabbtn on" data-tab="send"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12h13M12 5l7 7-7 7"/></svg>Send</button>
+    <button class="tabbtn" data-tab="live"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><rect x="2.5" y="6" width="19" height="12" rx="3"/><path d="M6.5 10h1M10 10h1M13.5 10h1M17 10h1M8 14h8"/></svg>Live input</button>
+    <button class="tabbtn" data-tab="ldn"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M4.5 9.5a10 10 0 0 1 15 0M7.5 13a6 6 0 0 1 9 0M10.5 16.5a2.5 2.5 0 0 1 3 0M12 20h.01"/></svg>LDN</button>
+    <button class="tabbtn" data-tab="status"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 20v-6m-5 6v-9m10 9V8M4 20h16"/></svg>Status</button>
+  </nav>
+  <div class="hstat"><span class="chip" id="linkChip"><span class="dot" id="linkDot"></span><span id="linkText">connecting…</span></span></div>
+</header>
 
-  <section id="drop" class="card drop">
+<!-- ============ SEND ============ -->
+<main class="wrap" id="tab-send">
+  <div class="card">
+    <div id="drop" class="drop">
+      <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#8fc1ff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V4M8 8l4-4 4 4M5 15v3a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-3"/></svg></div>
+      <div>
+        <div><b>Drop a .C7S file here</b> or <button id="browse" class="link">browse</button></div>
+        <div class="muted" style="font-size:13px">Saved to /switch/C7S-Loader on the console's SD card.</div>
+        <div id="uploadMsg" class="msg"></div>
+      </div>
+    </div>
     <input id="file" type="file" accept=".c7s,.C7S" hidden>
-    <p><strong>Drop a .C7S here</strong> or <button id="browse" class="link">browse</button></p>
-    <p class="muted">Stored in /switch/C7S-Loader on the console.</p>
-    <div id="uploadMsg" class="msg"></div>
-  </section>
+  </div>
 
-  <section class="card">
-    <h2>Payloads</h2>
-    <div id="files" class="files"><p class="muted">Loading...</p></div>
-    <div class="actions"><button id="ktestBtn" class="danger">Test keys (5s)</button></div>
-  </section>
+  <div class="runbar hidden" id="runbar">
+    <span class="pct" id="runPct">0%</span>
+    <div class="track"><div class="fill" id="runFill"></div></div>
+    <span class="muted" id="runMeta"></span>
+    <button class="danger" id="cancelBtn">Stop</button>
+  </div>
 
-  <section id="confirmPanel" class="card hidden">
-    <h2>Are you sure?</h2>
-    <p id="confirmText"></p>
-    <div class="actions">
-      <button id="startBtn" class="danger big">START</button>
-      <button id="refreshBtn" class="ghost">Refresh</button>
+  <div class="grid">
+    <div class="card">
+      <h2>Scripts on SD card <span class="muted" style="margin-left:auto;letter-spacing:0;text-transform:none;font-weight:400"><span id="fileCount">0 files</span> · <button class="link" id="refreshBtn">Refresh</button></span></h2>
+      <div id="files" class="files"><p class="muted">Loading…</p></div>
     </div>
-    <div id="startMsg" class="msg"></div>
-  </section>
-
-  <section id="runPanel" class="card hidden">
-    <h2>Running</h2>
-    <p id="runName"></p>
-    <div class="bar"><div id="barFill"></div></div>
-    <p id="runStep" class="muted"></p>
-    <div class="actions"><button id="cancelBtn" class="danger">Cancel</button></div>
-  </section>
-
-  <section class="card liveCard">
-    <div class="liveHead">
-      <h2>Live input</h2>
-      <span id="liveState" class="liveState">off</span>
-      <label class="check"><input id="liveEnable" type="checkbox"> Enable</label>
+    <div class="card col" id="selCard">
+      <h2>Selected</h2>
+      <div id="selEmpty" class="muted" style="padding:18px 0">Pick a script on the left to see its details and send it.</div>
+      <div id="selBody" class="hidden">
+        <div id="selBadge"></div>
+        <div class="selname" id="selName"></div>
+        <div class="facts" id="selFacts"></div>
+        <div class="warnline hidden" id="selWarn"></div>
+        <pre class="pre" id="selPreview"></pre>
+        <div class="explain" id="selExplain"></div>
+        <button class="btn primary block lg" id="startBtn">Send to Switch 2</button>
+        <div id="startMsg" class="msg"></div>
+      </div>
     </div>
-    <p class="muted">Press and hold on-screen keys or gamepad buttons. Shortcuts send the combo once.</p>
+  </div>
+</main>
+
+<!-- ============ LIVE ============ -->
+<main class="wrap hidden" id="tab-live">
+  <div class="card">
+    <div class="toolbar">
+      <div class="toggle" id="liveToggle"><span class="sw" id="liveSw"></span><span>Live input</span></div>
+      <span class="livestate" id="liveState">off</span>
+      <div class="spacer"></div>
+      <button class="ghost" id="liveRelease">Release all</button>
+    </div>
+    <div class="muted" style="font-size:13px;margin-bottom:14px">Turn on Live input, then press and hold on-screen keys or gamepad buttons to send them to the Switch 2. Shortcuts send the combo once.</div>
     <div class="shortcuts">
       <button type="button" class="liveControl shortcut" data-shortcut="4,42">Alt+Backspace</button>
       <button type="button" class="liveControl shortcut" data-shortcut="4,40">Alt+Enter</button>
       <button type="button" class="liveControl shortcut" data-shortcut="4,41">Alt+Esc</button>
     </div>
-    <div class="liveCols">
-      <div class="liveGroup">
-        <h3>Keyboard</h3>
+    <div class="livecols">
+      <div>
+        <div class="subh">Keyboard</div>
         <div class="mods">
-          <button type="button" class="liveControl key mod" data-mod="4">Alt</button>
-          <button type="button" class="liveControl key mod" data-mod="1">Ctrl</button>
-          <button type="button" class="liveControl key mod" data-mod="2">Shift</button>
+          <button type="button" class="liveControl k fn mod" data-mod="1">Ctrl</button>
+          <button type="button" class="liveControl k fn mod" data-mod="4">Alt</button>
+          <button type="button" class="liveControl k fn mod" data-mod="2">Shift</button>
         </div>
-        <div id="liveKeyboard" class="keyboard"></div>
+        <div id="liveKeyboard" class="kb"></div>
       </div>
-      <div class="liveGroup">
-        <h3>Gamepad</h3>
-        <div class="padTop">
-          <div id="liveDpad" class="dpad"></div>
-          <div id="liveFace" class="face"></div>
+      <div class="padwrap">
+        <div class="subh">Gamepad</div>
+        <div class="padgrid">
+          <div><div class="subh">D-pad</div><div id="liveDpad" class="dpad"></div></div>
+          <div><div class="subh">Buttons</div><div id="liveFace" class="face"></div></div>
         </div>
-        <div id="liveShoulders" class="padRow"></div>
-        <div id="liveSystem" class="padRow"></div>
+        <div><div class="subh">Shoulders</div><div id="liveShoulders" class="prow"></div></div>
+        <div><div class="subh">System</div><div id="liveSystem" class="prow"></div></div>
       </div>
     </div>
-    <div class="actions"><button type="button" id="liveRelease" class="ghost liveControl">Release all</button></div>
     <div id="liveMsg" class="msg"></div>
-  </section>
-
-  <section class="card logCard">
-    <h2>USB log</h2>
-    <pre id="usbConsole" class="console"></pre>
-  </section>
-
-  <section class="card logCard">
-    <h2>Run log</h2>
-    <pre id="runConsole" class="console"></pre>
-  </section>
-
-  <section class="card update">
-    <h2>Update app</h2>
-    <p class="muted">Upload a new c7s-loader.nro. The app closes; open it again from hbmenu.</p>
-    <input id="nroFile" type="file" accept=".nro" hidden>
-    <div class="actions">
-      <button id="nroBrowse" class="ghost">Choose .nro</button>
-      <button id="nroUpload" class="danger">Upload and apply</button>
-    </div>
-    <div id="nroMsg" class="msg"></div>
-  </section>
-
-  <section class="card settings">
-    <h2>Settings</h2>
-    <label>Port <input id="port" type="number" min="1" max="65535" value="6969"></label>
-    <button id="savePort" class="ghost">Save and restart</button>
-    <div id="settingsMsg" class="msg"></div>
-  </section>
+  </div>
 </main>
+
+<!-- ============ STATUS ============ -->
+<main class="wrap hidden" id="tab-status">
+  <div class="row2">
+    <div class="card">
+      <h2>USB link to Switch 2</h2>
+      <div class="linkhead">
+        <div class="orb" id="usbOrb"></div>
+        <div><div class="t" id="usbTitle">—</div><div class="muted" id="usbSub" style="font-size:13px"></div></div>
+      </div>
+      <div class="kv"><span class="muted">Gamepad</span><b id="usbPad">—</b></div>
+      <div class="kv"><span class="muted">Keyboard</span><b id="usbKbd">—</b></div>
+      <div class="kv"><span class="muted">Connection state</span><b id="usbState">—</b></div>
+      <div class="kv"><span class="muted">Failed reports</span><b id="usbFailed">—</b></div>
+      <button class="block" id="ktestBtn" style="margin-top:16px">Test keyboard — types "hello"</button>
+      <div id="ktestMsg" class="msg"></div>
+    </div>
+    <div class="card">
+      <h2>Open on another device</h2>
+      <div class="muted" style="font-size:13.5px;margin-bottom:12px">Open this address in a browser on a phone or PC that's on the same Wi-Fi as the Switch.</div>
+      <div class="urlbig" id="serverUrl">—</div>
+    </div>
+  </div>
+  <div class="row2">
+    <div class="card"><h2>USB log</h2><pre id="usbConsole" class="console"></pre></div>
+    <div class="card"><h2>Run log</h2><pre id="runConsole" class="console"></pre></div>
+  </div>
+  <div class="row2">
+    <div class="card">
+      <h2>Settings</h2>
+      <label class="field">Web app port <input id="port" type="number" min="1" max="65535" value="6969"></label>
+      <button id="savePort" style="margin-top:14px">Save and restart server</button>
+      <div id="settingsMsg" class="msg"></div>
+    </div>
+    <div class="card">
+      <h2>Update app</h2>
+      <div class="muted" style="font-size:13px;margin-bottom:12px">Upload a new c7s-loader.nro. The app closes; reopen it from hbmenu.</div>
+      <input id="nroFile" type="file" accept=".nro" hidden>
+      <div style="display:flex;gap:10px"><button class="ghost" id="nroBrowse">Choose .nro</button><button class="danger" id="nroUpload">Upload and apply</button></div>
+      <div id="nroMsg" class="msg"></div>
+    </div>
+  </div>
+</main>
+
+<!-- ============ LDN ============ -->
+<main class="wrap hidden" id="tab-ldn">
+  <div class="card">
+    <h2>LDN injection</h2>
+    <div class="muted" style="font-size:14px;margin-bottom:8px">On the Switch 2: <b>MULTIPLAYER → WIRELESS → CREATE GAME → HOST LOBBY (+)</b>. Keep the lobby open.</div>
+    <div class="muted" style="font-size:13px;margin-bottom:16px">The Switch 1 joins over local wireless using the native ldn service. No prod.keys.</div>
+    <div style="display:flex;gap:14px;align-items:center;margin-bottom:16px">
+      <button class="btn primary" id="ldnStart">Start LDN</button>
+      <span class="muted" id="ldnStatus">idle</span>
+    </div>
+    <pre id="ldnLog" class="console"></pre>
+  </div>
+</main>
+
 <script src="/app.js"></script>
 </body>
 </html>

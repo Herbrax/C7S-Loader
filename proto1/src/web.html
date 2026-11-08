@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>C7S-Loader web mockup</title>
+<style>
+:root {
+  color-scheme: dark;
+  --bg: #0b1220; --panel: #121a2b; --panel2: #19233a; --panel3: #212d48;
+  --line: #26324d; --line2: #33415f;
+  --text: #e8edf5; --muted: #8e9ab3; --dim: #5d6a86;
+  --accent: #2f8cff; --accent-bg: #173462;
+  --gold: #d9b65e; --ok: #3ccf91; --warn: #ffc440; --err: #ff6b6b; --red: #e32636;
+  --mono: ui-monospace, "SF Mono", Menlo, monospace;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: var(--bg); color: var(--text); font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; min-height: 100vh; }
+.muted { color: var(--muted); }
+.mono { font-family: var(--mono); }
+svg { flex: none; }
+
+header { height: 64px; display: flex; align-items: center; gap: 24px; padding: 0 28px; border-bottom: 1px solid var(--line); background: rgba(11,18,32,.92); position: sticky; top: 0; z-index: 5; }
+.brand { font-family: var(--mono); font-weight: 700; font-size: 21px; letter-spacing: -.5px; width: 220px; }
+.brand span { color: var(--gold); }
+nav { flex: 1; display: flex; justify-content: center; gap: 6px; }
+nav a { display: flex; align-items: center; gap: 8px; padding: 8px 18px; border-radius: 999px; color: var(--muted); font-weight: 600; text-decoration: none; }
+nav a.on { background: var(--panel3); color: var(--text); box-shadow: inset 0 0 0 1px var(--line2); }
+.hstat { width: 220px; display: flex; justify-content: flex-end; }
+.chip { display: inline-flex; align-items: center; gap: 8px; height: 30px; padding: 0 12px; border-radius: 15px; background: var(--panel2); box-shadow: inset 0 0 0 1px var(--line); font-size: 13px; font-weight: 600; white-space: nowrap; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 3px rgba(60,207,145,.2); }
+.dot.warn { background: var(--warn); box-shadow: 0 0 0 3px rgba(255,196,64,.2); }
+
+.wrap { width: min(1080px, 94vw); margin: 0 auto; padding: 28px 0 80px; }
+.runbar { width: min(1080px, 94vw); margin: 20px auto -8px; display: flex; align-items: center; gap: 18px; padding: 14px 20px; border-radius: 14px; background: linear-gradient(90deg, #163163, #122240); box-shadow: inset 0 0 0 1px #295196; }
+.runbar .pct { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.runbar .meta { font-size: 13px; }
+.runbar .track { flex: 1; height: 8px; border-radius: 99px; background: rgba(255,255,255,.1); overflow: hidden; }
+.runbar .fill { height: 100%; background: linear-gradient(90deg, var(--accent), #5fb0ff); border-radius: 99px; }
+.runbar button { flex: none; }
+
+h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 1.4px; color: var(--muted); margin-bottom: 14px; display: flex; align-items: center; gap: 10px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 22px; margin-bottom: 18px; }
+.grid { display: grid; grid-template-columns: 1.55fr 1fr; gap: 18px; align-items: start; }
+.col { display: flex; flex-direction: column; }
+
+button, .btn { font: inherit; font-weight: 600; border-radius: 10px; border: 1px solid var(--line2); background: var(--panel3); color: var(--text); padding: 10px 16px; cursor: pointer; display: inline-flex; align-items: center; gap: 8px; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.danger { background: var(--red); border-color: var(--red); color: #fff; }
+.btn.ghost { background: transparent; }
+.btn.block { width: 100%; justify-content: center; }
+.btn.lg { padding: 16px; font-size: 18px; border-radius: 14px; }
+
+.drop { border: 1.5px dashed var(--line2); border-radius: 14px; padding: 20px; display: flex; align-items: center; gap: 16px; background: var(--panel2); }
+.drop .ic { width: 46px; height: 46px; border-radius: 12px; background: rgba(47,140,255,.14); display: flex; align-items: center; justify-content: center; }
+.drop b { font-size: 15px; }
+.drop .link { color: var(--accent); text-decoration: underline; cursor: pointer; }
+
+.files { display: flex; flex-direction: column; gap: 10px; }
+.file { display: flex; align-items: center; gap: 14px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel2); cursor: pointer; }
+.file.active { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); background: var(--accent-bg); }
+.file .fi { width: 40px; height: 40px; border-radius: 10px; display: flex; align-items: center; justify-content: center; flex: none; }
+.file .nm { font-weight: 600; word-break: break-all; }
+.file .mt { font-size: 12.5px; color: var(--muted); margin-top: 1px; }
+.file .right { margin-left: auto; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; flex: none; }
+.file .sz { font-size: 12px; color: var(--muted); }
+.file .dl { font-size: 12px; color: var(--accent); text-decoration: none; }
+.badge { display: inline-flex; align-items: center; height: 22px; padding: 0 9px; border-radius: 7px; font-size: 11px; font-weight: 700; letter-spacing: .6px; }
+.b-text { background: rgba(47,140,255,.16); color: #8fc1ff; }
+.b-script { background: rgba(60,207,145,.15); color: #7ee6b8; }
+.b-chat { background: rgba(217,182,94,.16); color: #ecd291; }
+
+.selhead { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+.selname { font-size: 20px; font-weight: 700; word-break: break-all; }
+.facts { display: flex; gap: 18px; font-size: 13px; color: var(--muted); margin: 12px 0 14px; }
+.facts b { color: var(--text); }
+.pre { background: #0a101c; border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; font-family: var(--mono); font-size: 12.5px; line-height: 1.7; color: #b9c5d9; max-height: 150px; overflow: hidden; white-space: pre; }
+.pre .ln { color: var(--dim); display: inline-block; width: 26px; }
+.explain { font-size: 13px; color: var(--muted); margin: 14px 0; line-height: 1.5; }
+.msg { font-size: 13px; margin-top: 10px; min-height: 1em; }
+.msg.ok { color: var(--ok); } .msg.err { color: var(--err); }
+
+/* live */
+.toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
+.toggle { display: inline-flex; align-items: center; gap: 10px; padding: 8px 14px; border-radius: 10px; background: var(--panel2); box-shadow: inset 0 0 0 1px var(--line); font-weight: 600; cursor: pointer; }
+.sw { width: 40px; height: 23px; border-radius: 12px; background: var(--line2); position: relative; flex: none; }
+.sw::after { content: ""; position: absolute; left: 3px; top: 3px; width: 17px; height: 17px; border-radius: 50%; background: #c7d0e0; transition: .15s; }
+.sw.on { background: var(--ok); } .sw.on::after { left: 20px; background: #fff; }
+.toolbar .rec { margin-left: auto; }
+.echo { display: flex; align-items: center; gap: 12px; background: #0a101c; border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; margin-bottom: 16px; font-family: var(--mono); }
+.echo .tag { font-family: -apple-system, sans-serif; font-size: 11px; font-weight: 700; letter-spacing: 1px; color: var(--dim); }
+.echo .txt { font-size: 16px; }
+.caret { display: inline-block; width: 2px; height: 18px; background: var(--accent); vertical-align: -3px; }
+
+.livecols { display: grid; grid-template-columns: 1.4fr 1fr; gap: 24px; }
+.kb { display: flex; flex-direction: column; gap: 7px; }
+.krow { display: flex; gap: 7px; }
+.k { flex: 1; min-width: 0; height: 52px; border-radius: 9px; background: var(--panel2); box-shadow: inset 0 0 0 1px var(--line), 0 2px 0 #0a101c; display: flex; align-items: center; justify-content: center; font-family: var(--mono); font-size: 16px; position: relative; cursor: pointer; }
+.k.fn { font-family: -apple-system, sans-serif; font-size: 12px; color: #c3cde0; background: #162036; }
+.k.w15 { flex: 1.5; } .k.w175 { flex: 1.75; } .k.w2 { flex: 2; } .k.w225 { flex: 2.25; } .k.w275 { flex: 2.75; } .k.w8 { flex: 8; }
+.k.on { background: var(--accent-bg); box-shadow: inset 0 0 0 1.5px var(--accent); color: #fff; }
+.mods { display: flex; gap: 7px; margin-bottom: 7px; }
+.mods .k { flex: 0 0 90px; }
+
+.padwrap { display: flex; flex-direction: column; gap: 14px; }
+.padgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+.dpad { display: grid; grid-template-columns: repeat(3, 46px); grid-template-rows: repeat(3, 46px); gap: 5px; justify-content: center; }
+.dpad .pb { width: 46px; height: 46px; }
+.up { grid-area: 1/2; } .left { grid-area: 2/1; } .right { grid-area: 2/3; } .down { grid-area: 3/2; }
+.face { display: grid; grid-template-columns: repeat(2, 56px); grid-template-rows: repeat(2, 56px); gap: 8px; justify-content: center; }
+.face .pb { width: 56px; height: 56px; border-radius: 50%; font-size: 20px; }
+.gx { grid-area: 1/1; } .gy { grid-area: 2/1; } .ga { grid-area: 1/2; } .gb { grid-area: 2/2; }
+.prow { display: flex; gap: 7px; justify-content: center; flex-wrap: wrap; }
+.subh { font-size: 11px; text-transform: uppercase; letter-spacing: 1.2px; color: var(--dim); text-align: center; margin-bottom: 8px; }
+.pb { height: 46px; min-width: 52px; padding: 0 12px; border-radius: 10px; background: var(--panel2); box-shadow: inset 0 0 0 1px var(--line2), 0 2px 0 #0a101c; display: inline-flex; align-items: center; justify-content: center; font-weight: 600; cursor: pointer; }
+.pb.on { background: var(--accent); color: #fff; box-shadow: 0 0 0 3px rgba(47,140,255,.25); }
+
+.kv { display: flex; justify-content: space-between; padding: 11px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
+.kv:last-child { border: 0; }
+.ok { color: var(--ok); } .warn { color: var(--warn); }
+.qr { width: 150px; height: 150px; background: #fff; border-radius: 12px; padding: 10px; flex: none; }
+.console { height: 150px; overflow: hidden; background: #0a101c; border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; font-family: var(--mono); font-size: 11.5px; line-height: 1.5; color: #9fb0c8; white-space: pre-wrap; }
+.row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+label.field { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 14px; }
+input[type=number], input[type=text] { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; color: var(--text); font: inherit; padding: 8px 10px; width: 120px; }
+.banner { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-radius: 12px; background: rgba(255,196,64,.1); box-shadow: inset 0 0 0 1px rgba(255,196,64,.4); color: #f3dfa4; font-size: 13.5px; margin-bottom: 16px; }
+
+@media (max-width: 760px) {
+  header { height: auto; flex-wrap: wrap; gap: 10px 16px; padding: 12px 18px; }
+  .brand { width: auto; font-size: 18px; }
+  .hstat { width: auto; order: 2; }
+  nav { order: 3; width: 100%; justify-content: flex-start; gap: 4px; overflow-x: auto; }
+  nav a { padding: 7px 14px; white-space: nowrap; }
+  .wrap { width: 92vw; padding: 18px 0 60px; }
+  .grid, .row2, .livecols, .padgrid { grid-template-columns: 1fr; }
+  .file { flex-wrap: wrap; }
+  .file .nm { word-break: break-word; }
+  .file .right { margin-left: 0; width: 100%; flex-direction: row; justify-content: space-between; align-items: center; margin-top: 2px; }
+  .k { font-size: 13px; height: 44px; }
+  .runbar { flex-wrap: wrap; }
+  .runbar .track { order: 3; flex-basis: 100%; }
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">C7S<span>-Loader</span></div>
+  <nav>
+    <a class="on" href="#"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12h13M12 5l7 7-7 7"/></svg>Send</a>
+    <a href="#"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><rect x="2.5" y="6" width="19" height="12" rx="3"/><path d="M6.5 10h1M10 10h1M13.5 10h1M17 10h1M8 14h8"/></svg>Live input</a>
+    <a href="#"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 20v-6m-5 6v-9m10 9V8M4 20h16"/></svg>Status</a>
+  </nav>
+  <div class="hstat"><span class="chip"><span class="dot"></span>Switch 2 linked</span></div>
+</header>
+<div id="app"></div>
+<script>
+const S = new URLSearchParams(location.search).get("s") || "send";
+const app = document.getElementById("app");
+const H = (s) => app.insertAdjacentHTML("beforeend", s);
+const IC = {
+  text: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#8fc1ff" stroke-width="2.2" stroke-linecap="round"><path d="M5 6h14M12 6v13M8 19h8"/></svg>',
+  script: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#7ee6b8" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 5 3 12l5 7M16 5l5 7-5 7"/></svg>',
+  chat: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#ecd291" stroke-width="2.2" stroke-linejoin="round"><path d="M4 5h16v11H9l-5 4z"/></svg>',
+};
+const B = { text: '<span class="badge b-text">TEXT</span>', script: '<span class="badge b-script">SCRIPT</span>', chat: '<span class="badge b-chat">CIV 7 CHAT</span>' };
+const DESC = { text: "Types each line, then presses Enter.", script: "Replays the recorded key and button timings.", chat: "Opens Civ 7 chat with the gamepad, types each line, and sends it." };
+const FILES = [
+  { n: "CIV7-RemoteJSLoader.C7S", m: "chat", t: "CIV7 Remote JS Loader", l: 87, s: "38.2 KB" },
+  { n: "CIV7-Reach-Chat-Input.C7S", m: "script", t: "CIV7 Reach Chat Input", l: 63, s: "1.1 KB" },
+  { n: "Recorded-2026-11-06-0942.C7S", m: "script", t: "Recorded 09:42", l: 148, s: "2.4 KB" },
+  { n: "Greeting.C7S", m: "text", t: "Greeting", l: 3, s: "96 B" },
+];
+const PREVIEW = {
+  chat: ['1/87"></div><img src=x onerror="p=window.p||[],p[0]=`func', '2/87"></div><img src=x onerror="p=window.p||[],p[1]=`i%5D', '3/87"></div><img src=x onerror="p=window.p||[],p[2]=`P.ch'],
+  script: ["@wait 0", "@key 0 0", "@pad 0 8 128 128 128 128", "@wait 724", "@pad 4 8 127 127 127 127"],
+  text: ["Hello from the Switch 1!", "This line is typed, then Enter.", "Third line."],
+};
+const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+function qr(size) {
+  const N = 25; let cells = "";
+  const fin = (r, c) => { const f = (r0, c0) => r >= r0 && r < r0 + 7 && c >= c0 && c < c0 + 7; for (const [r0, c0] of [[0, 0], [0, N - 7], [N - 7, 0]]) if (f(r0, c0)) { const rr = r - r0, cc = c - c0; return (rr === 0 || rr === 6 || cc === 0 || cc === 6 || (rr >= 2 && rr <= 4 && cc >= 2 && cc <= 4)) ? 1 : 0; } return -1; };
+  for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) { let v = fin(r, c); if (v < 0) v = ((r * 29 + c * 13 + r * c * 7) % 5) < 2 ? 1 : 0; if (v) cells += `<rect x="${c}" y="${r}" width="1.03" height="1.03"/>`; }
+  return `<div class="qr"><svg viewBox="0 0 ${N} ${N}" width="${size}" height="${size}" fill="#0b1220">${cells}</svg></div>`;
+}
+
+function sendTab(running) {
+  if (running) H(`<div class="runbar"><span class="pct">42%</span><div class="track"><div class="fill" style="width:42%"></div></div><span class="meta muted">CIV7-RemoteJSLoader.C7S · step 37 / 87 · ~0:57 left</span><button class="btn danger">Stop</button></div>`);
+  const rows = FILES.map((f, i) => `<div class="file ${i === 0 ? "active" : ""}">
+      <div class="fi" style="background:${{ text: "rgba(47,140,255,.14)", script: "rgba(60,207,145,.13)", chat: "rgba(217,182,94,.14)" }[f.m]}">${IC[f.m]}</div>
+      <div><div class="nm">${f.n}</div><div class="mt">${f.t} · ${f.l} lines</div></div>
+      <div class="right"><div class="sz">${B[f.m]} ${f.s}</div><a class="dl" href="#">Download</a></div>
+    </div>`).join("");
+  const f = FILES[0];
+  H(`<div class="wrap">
+    <div class="card">
+      <div class="drop"><div class="ic">${IC.script}</div><div><b>Drop a .C7S file here</b> or <span class="link">browse</span><div class="muted" style="font-size:13px">Saved to /switch/C7S-Loader on the console’s SD card.</div></div></div>
+    </div>
+    <div class="grid">
+      <div class="card">
+        <h2>Scripts on SD card <span class="muted" style="margin-left:auto;letter-spacing:0;text-transform:none">${FILES.length} files · <span class="link" style="color:var(--accent)">Refresh</span></span></h2>
+        <div class="files">${rows}</div>
+      </div>
+      <div class="card col">
+        <h2>Selected</h2>
+        <div class="selhead">${B[f.m]}</div>
+        <div class="selname">${f.n}</div>
+        <div class="facts"><span><b>${f.l}</b> lines</span><span><b>${f.s}</b></span><span>“${f.t}”</span></div>
+        <div class="pre">${PREVIEW[f.m].map((l, i) => `<span class="ln">${i + 1}</span>${esc(l)}`).join("\n")}</div>
+        <div class="explain">${DESC[f.m]} A 5-second countdown gives you time to focus the target field on the Switch 2.</div>
+        <button class="btn primary block lg">${running ? "Sending…" : "Send to Switch 2"}</button>
+        <div class="msg ${running ? "ok" : ""}">${running ? "Sending — keep the cable connected." : ""}</div>
+      </div>
+    </div>
+  </div>`);
+}
+
+function liveTab() {
+  H('<div class="wrap"></div>');
+  const w = app.querySelector(".wrap");
+  const U = (label, cls = "", on = false) => `<div class="k ${cls} ${on ? "on" : ""}">${label}</div>`;
+  const row = (arr) => `<div class="krow">${arr.join("")}</div>`;
+  const L = (s) => s.split("").map((c) => U(c));
+  const r1 = [U("`")].concat("1234567890".split("").map((n) => U(n)), [U("-"), U("="), U("⌫", "fn w15")]);
+  const r2 = [U("Tab", "fn w15")].concat(L("qwertyuiop"), [U("["), U("]"), U("\\", "w15")]);
+  const r3 = [U("Esc", "fn w175")].concat(L("asdfghjkl"), [U(";"), U("'"), U("Enter", "fn w225")]);
+  const r4 = [U("Shift", "fn w225")].concat(L("zxcvbnm"), [U(","), U("."), U("/"), U("Shift", "fn w275")]);
+  const r5 = [U("Ctrl", "fn w15"), U("Alt", "fn w15"), U("Space", "fn w8"), U("←", "fn"), U("↑", "fn"), U("↓", "fn"), U("→", "fn")];
+  const face = ['<div class="pb gx">X</div>', '<div class="pb gy">Y</div>', '<div class="pb ga on">A</div>', '<div class="pb gb">B</div>'];
+  const dpad = ['<div class="pb up">▲</div>', '<div class="pb left">◀</div>', '<div class="pb right">▶</div>', '<div class="pb down">▼</div>'];
+  w.innerHTML = `
+    <div class="card">
+      <div class="toolbar">
+        <div class="toggle"><span class="sw on"></span>Live input on</div>
+        <div class="toggle"><span class="sw"></span>Pass PC controller through</div>
+        <button class="btn danger rec"><span class="dot" style="background:#fff;box-shadow:none"></span>Record</button>
+        <button class="btn ghost">Release all</button>
+      </div>
+      <div class="echo"><span class="tag">SENT</span><span class="txt">Hello Switch 2! gg wp<span class="caret"></span></span>
+        <span style="margin-left:auto" class="muted">Quick keys</span>
+        <button class="btn ghost" style="padding:6px 12px">Alt+Enter</button><button class="btn ghost" style="padding:6px 12px">Alt+Esc</button><button class="btn ghost" style="padding:6px 12px">Alt+⌫</button></div>
+      <div class="livecols">
+        <div>
+          <div class="subh" style="text-align:left">Keyboard</div>
+          <div class="mods">${U("Ctrl", "fn")}${U("Alt", "fn")}${U("Shift", "fn")}</div>
+          <div class="kb">${[r1, r2, r3, r4, r5].map(row).join("")}</div>
+        </div>
+        <div class="padwrap">
+          <div class="subh" style="text-align:left">Gamepad</div>
+          <div class="padgrid">
+            <div><div class="subh">D-pad</div><div class="dpad">${dpad.join("")}</div></div>
+            <div><div class="subh">Buttons</div><div class="face">${face.join("")}</div></div>
+          </div>
+          <div><div class="subh">Shoulders</div><div class="prow"><div class="pb">L</div><div class="pb">ZL</div><div class="pb">R</div><div class="pb">ZR</div></div></div>
+          <div><div class="subh">System</div><div class="prow"><div class="pb">−</div><div class="pb">+</div><div class="pb">L3</div><div class="pb">R3</div><div class="pb">Home</div><div class="pb">Capture</div></div></div>
+        </div>
+      </div>
+      <div class="msg ok">Hold a key or button to keep it pressed. Shortcuts send the combo once.</div>
+    </div>`;
+}
+
+function statusTab() {
+  H(`<div class="wrap">
+    <div class="row2">
+      <div class="card">
+        <h2>USB link to Switch 2</h2>
+        <div style="display:flex;align-items:center;gap:14px;margin:6px 0 16px"><div style="width:48px;height:48px;border-radius:50%;background:rgba(60,207,145,.16);display:flex;align-items:center;justify-content:center"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#3ccf91" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg></div><div><div style="font-size:20px;font-weight:700">Linked</div><div class="muted" style="font-size:13px">Ready to send keys and buttons</div></div></div>
+        <div class="kv"><span class="muted">Gamepad</span><b class="ok">Ready</b></div>
+        <div class="kv"><span class="muted">Keyboard</span><b class="ok">Ready</b></div>
+        <div class="kv"><span class="muted">Connection state</span><b>Configured</b></div>
+        <div class="kv"><span class="muted">Failed reports</span><b>0</b></div>
+        <button class="btn block" style="margin-top:16px">Test keyboard — types “hello”</button>
+      </div>
+      <div class="card">
+        <h2>Open on another device</h2>
+        <div style="display:flex;gap:16px;align-items:center">${qr(150)}<div><div class="mono" style="font-size:20px;color:var(--accent)">192.168.1.42:6969</div><div class="muted" style="font-size:13px;margin-top:8px">Same Wi-Fi as the Switch. Scan to open this page on your phone.</div></div></div>
+      </div>
+    </div>
+    <div class="row2">
+      <div class="card">
+        <h2>USB log</h2>
+        <div class="console">usb: backend libnx
+usb: interface 0 gamepad, interface 1 keyboard
+usb: state 5 (configured) error 0 bus_resets 0
+usb: pad_ready kbd_ready leds 1
+kbd_sent 22 reports_failed 0</div>
+      </div>
+      <div class="card">
+        <h2>Settings</h2>
+        <div class="row2" style="gap:12px">
+          <label class="field">Web app port <input type="number" value="6969"></label>
+        </div>
+        <button class="btn" style="margin-top:14px">Save and restart server</button>
+        <div style="border-top:1px solid var(--line);margin:18px 0"></div>
+        <h2>Update app</h2>
+        <div class="muted" style="font-size:13px;margin-bottom:12px">Upload a new c7s-loader.nro. The app closes; reopen it from hbmenu.</div>
+        <div style="display:flex;gap:10px"><button class="btn ghost">Choose .nro</button><button class="btn danger">Upload and apply</button></div>
+      </div>
+    </div>
+  </div>`);
+}
+
+if (S === "send") sendTab(false);
+else if (S === "running") sendTab(true);
+else if (S === "live") liveTab();
+else if (S === "status") statusTab();
+</script>
+</body>
+</html>

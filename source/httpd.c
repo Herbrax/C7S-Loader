@@ -19,6 +19,7 @@
 #include "app.h"
 #include "c7s.h"
 #include "debuglog.h"
+#include "ldn_route.h"
 #include "live.h"
 #include "update.h"
 #include "settings.h"
@@ -604,6 +605,20 @@ static enum MHD_Result api_download(struct MHD_Connection *conn) {
     return ret;
 }
 
+static enum MHD_Result api_ldn(struct MHD_Connection *conn) {
+    const char *start = MHD_lookup_connection_value(conn, MHD_GET_ARGUMENT_KIND, "start");
+    if (start && (!strcmp(start, "1") || !strcmp(start, "true"))) ldn_route_start();
+    sb_t b = {0};
+    sb_add(&b, "{\"ok\":true,\"active\":");
+    sb_add(&b, ldn_route_active() ? "true" : "false");
+    sb_add(&b, ",\"status\":");
+    sb_json(&b, ldn_route_status());
+    sb_add(&b, ",\"log\":");
+    sb_json(&b, ldn_route_log());
+    sb_add(&b, "}");
+    return reply_json(conn, 200, &b);
+}
+
 static enum MHD_Result api_ktest(struct MHD_Connection *conn) {
     app_request_ktest();
     sb_t b = {0};
@@ -637,6 +652,8 @@ static enum MHD_Result dispatch(struct MHD_Connection *conn, const char *url, co
     if (post && !strcmp(url, "/api/ktest")) return api_ktest(conn);
     if (get && !strcmp(url, "/api/files")) return api_files(conn);
     if (get && !strcmp(url, "/api/download")) return api_download(conn);
+    if (get && !strcmp(url, "/api/ldn")) return api_ldn(conn);
+    if (post && !strcmp(url, "/api/ldn")) return api_ldn(conn);
     if (post && !strcmp(url, "/api/start")) return api_start(conn);
     if (post && !strcmp(url, "/api/cancel")) return api_cancel(conn);
     if (post && !strcmp(url, "/api/settings")) return api_settings(conn);
@@ -730,7 +747,7 @@ static void *serve(void *arg) {
         MHD_start_daemon(MHD_USE_THREAD_PER_CONNECTION | MHD_USE_INTERNAL_POLLING_THREAD |
                              MHD_USE_POLL | MHD_USE_ERROR_LOG,
                          g_port, NULL, NULL, &on_request, NULL,
-                         MHD_OPTION_CONNECTION_TIMEOUT, (unsigned int)15,
+                         MHD_OPTION_CONNECTION_TIMEOUT, (unsigned int)5,
                          MHD_OPTION_CONNECTION_LIMIT, (unsigned int)16,
                          MHD_OPTION_NOTIFY_COMPLETED, &on_completed, NULL,
                          MHD_OPTION_THREAD_STACK_SIZE, (size_t)(160 * 1024),
@@ -742,7 +759,7 @@ static void *serve(void *arg) {
     pthread_mutex_lock(&g_lock);
     g_running = 1;
     pthread_mutex_unlock(&g_lock);
-    while (!g_stop) usleep(200000);
+    while (!g_stop) usleep(50000);
     MHD_stop_daemon(daemon);
     pthread_mutex_lock(&g_lock);
     g_running = 0;
@@ -773,10 +790,14 @@ int httpd_start(unsigned short port) {
     return -1;
 }
 
+void httpd_request_stop(void) {
+    g_stop = 1;
+}
+
 void httpd_stop(void) {
     app_exit_trace("httpd_stop: begin running=%d", g_running);
     g_stop = 1;
-    for (int i = 0; i < 1000 && g_running; i++) usleep(10000);
+    for (int i = 0; i < 400 && g_running; i++) usleep(10000);
     app_exit_trace("httpd_stop: end running=%d", g_running);
 }
 

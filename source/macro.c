@@ -225,11 +225,13 @@ bool c7s_macro_run(const C7sMacro *macro, C7sCancelFn cancel, void *cancel_user,
     C7sKbdReport last_kbd;
     memset(&last_kbd, 0, sizeof(last_kbd));
     C7sPadReport last_pad = kPadNeutral;
+    bool ok = true;
 
     for (size_t i = 0; i < macro->count; i++) {
         if (cancelled(cancel, cancel_user)) {
             snprintf(err, errlen, "cancelled");
-            return false;
+            ok = false;
+            break;
         }
         const C7sStep *step = &macro->steps[i];
         if (progress) progress((unsigned)i, (unsigned)macro->count, progress_user);
@@ -254,11 +256,13 @@ bool c7s_macro_run(const C7sMacro *macro, C7sCancelFn cancel, void *cancel_user,
 
         if (kbd_changed && !send_kbd(want_kbd.modifier, want_kbd.keycode[0], cancel, cancel_user)) {
             snprintf(err, errlen, "keyboard transfer failed at step %u", (unsigned)i);
-            return false;
+            ok = false;
+            break;
         }
         if (pad_changed && !send_pad(&want_pad, cancel, cancel_user)) {
             snprintf(err, errlen, "gamepad transfer failed at step %u", (unsigned)i);
-            return false;
+            ok = false;
+            break;
         }
 
         last_kbd = want_kbd;
@@ -266,11 +270,18 @@ bool c7s_macro_run(const C7sMacro *macro, C7sCancelFn cancel, void *cancel_user,
 
         if (!sleep_ms(step->duration_ms, cancel, cancel_user)) {
             snprintf(err, errlen, "cancelled");
-            return false;
+            ok = false;
+            break;
         }
     }
 
-    send_kbd(0, 0, cancel, cancel_user);
-    send_pad(&kPadNeutral, cancel, cancel_user);
-    return true;
+    /* Always release whatever was left held, even on cancel or a mid-run
+       failure, so the target console is never left with a stuck key or
+       button. Forced through (cancel flag ignored) so a cancel still lifts
+       the last key. */
+    bool kbd_held = last_kbd.modifier != 0 || last_kbd.keycode[0] != 0;
+    bool pad_held = memcmp(&last_pad, &kPadNeutral, sizeof(last_pad)) != 0;
+    if (kbd_held) send_kbd(0, 0, NULL, NULL);
+    if (pad_held) send_pad(&kPadNeutral, NULL, NULL);
+    return ok;
 }

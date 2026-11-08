@@ -9,10 +9,12 @@
 #include "app.h"
 #include "carry.h"
 #include "httpd.h"
+#include "ldn_route.h"
 #include "live.h"
 #include "preload.h"
 #include "record.h"
 #include "settings.h"
+#include "temp_ftp.h"
 #include "switch_init.h"
 #include "update.h"
 #include "ui.h"
@@ -38,6 +40,7 @@ int main(int argc, char **argv) {
     mkdir("sdmc:/switch/plume-usb", 0777);
     preload_payloads();
     update_init(envHasArgv() ? (const char *)envGetArgv() : NULL);
+    ldn_route_init();
 
     char ip[64];
     local_ip(ip, sizeof(ip));
@@ -59,10 +62,13 @@ int main(int argc, char **argv) {
     if (httpd_start(port) != 0) {
         app_mark_finished(false, "web server failed to start");
     }
+    /* TEMP-FTP: diagnostic-only. Remove this call before release. */
+    temp_ftp_start();
 
     app_exit_trace("=== start ===");
     c7s_ui_run();
     app_exit_trace("main: ui returned");
+    ldn_route_shutdown();
 
     httpd_stop();
     app_exit_trace("main: httpd stopped");
