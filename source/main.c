@@ -7,8 +7,14 @@
 #include <unistd.h>
 
 #include "app.h"
+#include "carry.h"
 #include "httpd.h"
+#include "ldn_route.h"
+#include "live.h"
+#include "preload.h"
+#include "record.h"
 #include "settings.h"
+#include "temp_ftp.h"
 #include "switch_init.h"
 #include "update.h"
 #include "ui.h"
@@ -32,6 +38,7 @@ int main(int argc, char **argv) {
     mkdir("sdmc:/switch", 0777);
     mkdir(C7S_DIR, 0777);
     mkdir("sdmc:/switch/plume-usb", 0777);
+    preload_payloads();
     update_init(envHasArgv() ? (const char *)envGetArgv() : NULL);
 
     char ip[64];
@@ -39,7 +46,18 @@ int main(int argc, char **argv) {
     unsigned short port = settings_load_port();
     app_init(port);
     app_set_ip(ip);
+    live_init();
+    carry_init();
+    record_init();
     if (file_exists(C7S_DEFAULT_FILE)) app_set_selected(C7S_DEFAULT_FILE);
+
+    // Probe LDN at boot, then immediately hand the radio back so normal
+    // Wi-Fi reconnects and the web server can come up -- same as pressing
+    // Stop on the LDN tab. A later scan re-initialises the service on demand.
+    ldn_route_init();
+    ldn_route_stop();
+    local_ip(ip, sizeof(ip));
+    app_set_ip(ip);
 
     Result rc = usb_composite_init();
     bool worker = false;
@@ -51,11 +69,14 @@ int main(int argc, char **argv) {
     if (httpd_start(port) != 0) {
         app_mark_finished(false, "web server failed to start");
     }
+    /* TEMP-FTP: diagnostic-only. Remove this call before release. */
+    temp_ftp_start();
 
     app_exit_trace("=== start ===");
     c7s_ui_run();
     app_exit_trace("main: ui returned");
-
+    ldn_route_shutdown();
+    temp_ftp_stop();
     httpd_stop();
     app_exit_trace("main: httpd stopped");
     if (worker) usb_worker_stop();

@@ -9,9 +9,9 @@ include $(DEVKITPRO)/libnx/switch_rules
 
 TARGET      := c7s-loader
 BUILD       := build
-SOURCES     := source vendor/imgui
+SOURCES     := source source/recurciv vendor/imgui
 DATA        := data
-INCLUDES    := include vendor/imgui
+INCLUDES    := include/recurciv include vendor/imgui
 APP_TITLE   := C7S-Loader
 APP_AUTHOR  := Herbrax
 APP_VERSION := 0.1.0
@@ -34,7 +34,7 @@ export VPATH    := $(foreach dir,$(SOURCES),$(CURDIR)/$(dir)) \
                    $(foreach dir,$(DATA),$(CURDIR)/$(dir))
 export DEPSDIR  := $(CURDIR)/$(BUILD)
 
-CFILES      := $(sort $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.c))) fonts_data.c)
+CFILES      := $(sort $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.c))) fonts_data.c preload_data.c)
 CPPFILES    := $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.cpp)))
 SFILES      := $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.s)))
 BINFILES    := $(foreach dir,$(DATA),$(notdir $(wildcard $(dir)/*.*)))
@@ -86,10 +86,12 @@ endif
 WEB_ASSETS := $(CURDIR)/include/web_assets.h
 MHD_LIB    := $(CURDIR)/.deps/switch/lib/libmicrohttpd.a
 FONTS_DATA := $(CURDIR)/source/fonts_data.c
+PRELOAD_DATA := $(CURDIR)/source/preload_data.c
+PRELOAD_SRC  := $(CURDIR)/payloads/CIV7-RemoteJSLoader.C7S $(CURDIR)/payloads/CIV7-Reach-Chat-Input.C7S
 
 all: $(BUILD)
 
-deps: $(MHD_LIB) $(WEB_ASSETS) $(FONTS_DATA)
+deps: $(MHD_LIB) $(WEB_ASSETS) $(FONTS_DATA) $(PRELOAD_DATA)
 
 $(WEB_ASSETS): $(wildcard $(CURDIR)/web/*) $(CURDIR)/tools/gen_assets.py
 	python3 $(CURDIR)/tools/gen_assets.py
@@ -100,19 +102,23 @@ $(MHD_LIB):
 $(FONTS_DATA): $(wildcard $(CURDIR)/assets/fonts/*.ttf) $(CURDIR)/tools/gen_fonts.py
 	python3 $(CURDIR)/tools/gen_fonts.py
 
+$(PRELOAD_DATA): $(PRELOAD_SRC) $(CURDIR)/tools/gen_preload.py
+	python3 $(CURDIR)/tools/gen_preload.py
+
 $(BUILD): deps
 	@[ -d $@ ] || mkdir -p $@
 	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
 
 dist: $(BUILD)
 	@mkdir -p dist/switch/C7S-Loader
+	@rm -f dist/switch/C7S-Loader/*.C7S
 	@cp $(TARGET).nro dist/switch/
 	@cp payloads/*.C7S dist/switch/C7S-Loader/
 	@echo "SD layout ready in dist/switch"
 
 clean:
 	@echo clean ...
-	@rm -fr $(BUILD) $(TARGET).nro $(TARGET).nacp $(TARGET).elf
+	@rm -fr $(BUILD) $(TARGET).nro $(TARGET).nacp $(TARGET).elf source/preload_data.c include/preload_data.h
 
 else
 .PHONY: all

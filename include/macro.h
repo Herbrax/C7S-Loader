@@ -11,6 +11,7 @@ enum {
     C7S_STEP_WAIT = 0,
     C7S_STEP_KEYBOARD = 1,
     C7S_STEP_GAMEPAD = 2,
+    C7S_STEP_STATE = 3,
 };
 
 typedef struct {

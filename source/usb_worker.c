@@ -8,9 +8,11 @@
 #include <switch.h>
 
 #include "app.h"
+#include "carry.h"
 #include "c7s.h"
 #include "debuglog.h"
 #include "keymap.h"
+#include "live.h"
 #include "macro.h"
 #include "usb_composite.h"
 
@@ -159,14 +161,20 @@ static void *worker(void *arg) {
     while (!g_stop) {
         char name[128];
         if (app_take_start(name, sizeof(name))) {
+            live_release_all();
+            live_tick();
             run_payload(name);
             continue;
         }
         if (app_take_ktest()) {
+            live_release_all();
+            live_tick();
             run_keyboard_test();
             continue;
         }
         usb_composite_poll(now_ms());
+        live_tick();
+        carry_tick();
         svcSleepThread(1000000ull);
     }
     run_log("worker stop");

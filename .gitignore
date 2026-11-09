@@ -7,3 +7,5 @@ kbdtest/build/
 *.nacp
 source/fonts_data.c
 include/web_assets.h
+source/preload_data.c
+include/preload_data.h

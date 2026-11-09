@@ -19,6 +19,11 @@
 #define PREAMBLE_GAP_MS 800
 #define ESC_TO_A_WAIT_MS 800
 
+#define PLAIN_KEY_HOLD_MS 40
+#define PLAIN_KEY_GAP_MS 40
+#define PLAIN_ENTER_HOLD_MS 40
+#define PLAIN_LINE_DELAY_MS 250
+
 static const C7sPadReport kPadNeutral = {
     .buttons = 0,
     .hat = SWITCH_HAT_NOTHING,
@@ -64,6 +69,67 @@ bool c7s_macro_build(const C7sPayload *payload, C7sMacro *out, char *err, size_t
         return false;
     }
     size_t n = 0;
+
+    if (payload->script) {
+        uint8_t kmod = 0;
+        uint8_t kkey = 0;
+        C7sPadReport pad;
+        memset(&pad, 0, sizeof(pad));
+        pad.hat = SWITCH_HAT_NOTHING;
+        pad.lx = pad.ly = pad.rx = pad.ry = SWITCH_STICK_MID;
+        for (int line = 0; line < payload->line_count; line++) {
+            const char *p = payload->lines[line];
+            unsigned a = 0, b = 0, c = 0, d = 0, e = 0, f = 0;
+            if (sscanf(p, "@wait %u", &a) == 1) {
+                push(steps, cap, &n, C7S_STEP_STATE, (uint16_t)a, kmod, kkey, &pad);
+            } else if (sscanf(p, "@key %u %u", &a, &b) == 2) {
+                kmod = (uint8_t)a;
+                kkey = (uint8_t)b;
+            } else if (sscanf(p, "@pad %u %u %u %u %u %u", &a, &b, &c, &d, &e, &f) == 6) {
+                pad.buttons = (uint16_t)a;
+                pad.hat = (uint8_t)b;
+                pad.lx = (uint8_t)c;
+                pad.ly = (uint8_t)d;
+                pad.rx = (uint8_t)e;
+                pad.ry = (uint8_t)f;
+            }
+        }
+        memset(&pad, 0, sizeof(pad));
+        pad.hat = SWITCH_HAT_NOTHING;
+        pad.lx = pad.ly = pad.rx = pad.ry = SWITCH_STICK_MID;
+        push(steps, cap, &n, C7S_STEP_STATE, FINAL_RELEASE_MS, 0, 0, &pad);
+        out->steps = steps;
+        out->count = n;
+        return true;
+    }
+
+    if (payload->plain) {
+        for (int line = 0; line < payload->line_count; line++) {
+            int prev_key = -1;
+            const char *p = payload->lines[line];
+            for (; *p; p++) {
+                uint8_t modifier = 0;
+                uint8_t keycode = 0;
+                if (!c7s_ascii_to_hid((unsigned char)*p, &modifier, &keycode)) {
+                    snprintf(err, errlen, "unsupported character 0x%02x on line %d",
+                             (unsigned char)*p, line + 1);
+                    free(steps);
+                    return false;
+                }
+                if (prev_key == (int)keycode) {
+                    push(steps, cap, &n, C7S_STEP_WAIT, PLAIN_KEY_GAP_MS, 0, 0, NULL);
+                }
+                push(steps, cap, &n, C7S_STEP_KEYBOARD, PLAIN_KEY_HOLD_MS, modifier, keycode, NULL);
+                prev_key = keycode;
+            }
+            push(steps, cap, &n, C7S_STEP_KEYBOARD, PLAIN_ENTER_HOLD_MS, 0, C7S_KEY_ENTER, NULL);
+            push(steps, cap, &n, C7S_STEP_WAIT, PLAIN_LINE_DELAY_MS, 0, 0, NULL);
+        }
+        push(steps, cap, &n, C7S_STEP_WAIT, FINAL_RELEASE_MS, 0, 0, NULL);
+        out->steps = steps;
+        out->count = n;
+        return true;
+    }
 
     for (int i = 0; i < PREAMBLE_A_COUNT; i++) {
         push(steps, cap, &n, C7S_STEP_GAMEPAD, A_PRESS_MS, 0, 0, &kPadA);
@@ -159,11 +225,13 @@ bool c7s_macro_run(const C7sMacro *macro, C7sCancelFn cancel, void *cancel_user,
     C7sKbdReport last_kbd;
     memset(&last_kbd, 0, sizeof(last_kbd));
     C7sPadReport last_pad = kPadNeutral;
+    bool ok = true;
 
     for (size_t i = 0; i < macro->count; i++) {
         if (cancelled(cancel, cancel_user)) {
             snprintf(err, errlen, "cancelled");
-            return false;
+            ok = false;
+            break;
         }
         const C7sStep *step = &macro->steps[i];
         if (progress) progress((unsigned)i, (unsigned)macro->count, progress_user);
@@ -177,6 +245,10 @@ bool c7s_macro_run(const C7sMacro *macro, C7sCancelFn cancel, void *cancel_user,
             want_kbd.keycode[0] = step->keycode;
         } else if (step->op == C7S_STEP_GAMEPAD) {
             want_pad = step->pad;
+        } else if (step->op == C7S_STEP_STATE) {
+            want_kbd.modifier = step->modifier;
+            want_kbd.keycode[0] = step->keycode;
+            want_pad = step->pad;
         }
 
         bool kbd_changed = memcmp(&want_kbd, &last_kbd, sizeof(want_kbd)) != 0;
@@ -184,11 +256,13 @@ bool c7s_macro_run(const C7sMacro *macro, C7sCancelFn cancel, void *cancel_user,
 
         if (kbd_changed && !send_kbd(want_kbd.modifier, want_kbd.keycode[0], cancel, cancel_user)) {
             snprintf(err, errlen, "keyboard transfer failed at step %u", (unsigned)i);
-            return false;
+            ok = false;
+            break;
         }
         if (pad_changed && !send_pad(&want_pad, cancel, cancel_user)) {
             snprintf(err, errlen, "gamepad transfer failed at step %u", (unsigned)i);
-            return false;
+            ok = false;
+            break;
         }
 
         last_kbd = want_kbd;
@@ -196,11 +270,18 @@ bool c7s_macro_run(const C7sMacro *macro, C7sCancelFn cancel, void *cancel_user,
 
         if (!sleep_ms(step->duration_ms, cancel, cancel_user)) {
             snprintf(err, errlen, "cancelled");
-            return false;
+            ok = false;
+            break;
         }
     }
 
-    send_kbd(0, 0, cancel, cancel_user);
-    send_pad(&kPadNeutral, cancel, cancel_user);
-    return true;
+    /* Always release whatever was left held, even on cancel or a mid-run
+       failure, so the target console is never left with a stuck key or
+       button. Forced through (cancel flag ignored) so a cancel still lifts
+       the last key. */
+    bool kbd_held = last_kbd.modifier != 0 || last_kbd.keycode[0] != 0;
+    bool pad_held = memcmp(&last_pad, &kPadNeutral, sizeof(last_pad)) != 0;
+    if (kbd_held) send_kbd(0, 0, NULL, NULL);
+    if (pad_held) send_pad(&kPadNeutral, NULL, NULL);
+    return ok;
 }

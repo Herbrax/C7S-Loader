@@ -19,6 +19,8 @@
 #include "app.h"
 #include "c7s.h"
 #include "debuglog.h"
+#include "ldn_route.h"
+#include "live.h"
 #include "update.h"
 #include "settings.h"
 #include "usb_composite.h"
@@ -141,6 +143,8 @@ static void add_meta(sb_t *b, const C7sPayload *p, long long size) {
     sb_addf(b, "%d", p->line_count);
     sb_add(b, ",\"mismatch\":");
     sb_add(b, p->count_mismatch ? "true" : "false");
+    sb_add(b, ",\"plain\":");
+    sb_add(b, p->plain ? "true" : "false");
 }
 
 typedef struct {
@@ -478,6 +482,173 @@ static enum MHD_Result api_debug(struct MHD_Connection *conn) {
     return reply_json(conn, 200, &b);
 }
 
+static enum MHD_Result api_live(struct MHD_Connection *conn) {
+    const char *on = MHD_lookup_connection_value(conn, MHD_GET_ARGUMENT_KIND, "on");
+    const char *release = MHD_lookup_connection_value(conn, MHD_GET_ARGUMENT_KIND, "release");
+    if (on) {
+        live_set_enabled(!strcmp(on, "1") || !strcmp(on, "true"));
+    } else if (release) {
+        live_release_all();
+    }
+    sb_t b = {0};
+    sb_add(&b, "{\"ok\":true,\"enabled\":");
+    sb_add(&b, live_enabled() ? "true" : "false");
+    sb_add(&b, "}");
+    return reply_json(conn, 200, &b);
+}
+
+static enum MHD_Result api_live_key(struct MHD_Connection *conn) {
+    C7sAppSnapshot s;
+    app_snapshot(&s);
+    if (s.running) return reply_error(conn, 409, "payload running");
+    if (!live_enabled()) return reply_error(conn, 409, "live input is off");
+    if (!usb_keyboard_ready()) return reply_error(conn, 409, "keyboard not ready");
+
+    const char *mv = MHD_lookup_connection_value(conn, MHD_GET_ARGUMENT_KIND, "mod");
+    const char *kv = MHD_lookup_connection_value(conn, MHD_GET_ARGUMENT_KIND, "key");
+    if (!mv || !kv) return reply_error(conn, 400, "missing mod/key");
+    unsigned long mod = strtoul(mv, NULL, 0);
+    unsigned long key = strtoul(kv, NULL, 0);
+    if (mod > 255 || key > 255) return reply_error(conn, 400, "invalid key");
+
+    live_set_key((uint8_t)mod, (uint8_t)key);
+    sb_t b = {0};
+    sb_add(&b, "{\"ok\":true}");
+    return reply_json(conn, 200, &b);
+}
+
+static enum MHD_Result api_live_pad(struct MHD_Connection *conn) {
+    C7sAppSnapshot s;
+    app_snapshot(&s);
+    if (s.running) return reply_error(conn, 409, "payload running");
+    if (!live_enabled()) return reply_error(conn, 409, "live input is off");
+    if (!usb_gamepad_ready()) return reply_error(conn, 409, "gamepad not ready");
+
+    const char *bv = MHD_lookup_connection_value(conn, MHD_GET_ARGUMENT_KIND, "buttons");
+    const char *hv = MHD_lookup_connection_value(conn, MHD_GET_ARGUMENT_KIND, "hat");
+    if (!bv || !hv) return reply_error(conn, 400, "missing buttons/hat");
+    unsigned long buttons = strtoul(bv, NULL, 0);
+    unsigned long hat = strtoul(hv, NULL, 0);
+    if (buttons > 0xFFFF || hat > 255) return reply_error(conn, 400, "invalid pad");
+
+    C7sPadReport pad;
+    memset(&pad, 0, sizeof(pad));
+    pad.buttons = (uint16_t)buttons;
+    pad.hat = (uint8_t)hat;
+    pad.lx = SWITCH_STICK_MID;
+    pad.ly = SWITCH_STICK_MID;
+    pad.rx = SWITCH_STICK_MID;
+    pad.ry = SWITCH_STICK_MID;
+
+    static const char *axes[4] = {"lx", "ly", "rx", "ry"};
+    uint8_t *dst[4] = {&pad.lx, &pad.ly, &pad.rx, &pad.ry};
+    for (int i = 0; i < 4; i++) {
+        const char *v = MHD_lookup_connection_value(conn, MHD_GET_ARGUMENT_KIND, axes[i]);
+        if (!v) continue;
+        unsigned long x = strtoul(v, NULL, 0);
+        if (x > 255) return reply_error(conn, 400, "invalid axis");
+        *dst[i] = (uint8_t)x;
+    }
+
+    live_set_pad(&pad);
+    sb_t b = {0};
+    sb_add(&b, "{\"ok\":true}");
+    return reply_json(conn, 200, &b);
+}
+
+static enum MHD_Result api_download(struct MHD_Connection *conn) {
+    const char *name = MHD_lookup_connection_value(conn, MHD_GET_ARGUMENT_KIND, "name");
+    if (!name || !c7s_name_ok(name)) return reply_error(conn, 400, "invalid file name");
+
+    char path[PATH_MAX];
+    if (snprintf(path, sizeof(path), "%s/%s", C7S_DIR, name) >= (int)sizeof(path)) {
+        return reply_error(conn, 400, "path too long");
+    }
+    FILE *f = fopen(path, "rb");
+    if (!f) return reply_error(conn, 404, "not found");
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return reply_error(conn, 500, "cannot seek");
+    }
+    long size = ftell(f);
+    if (size < 0 || (unsigned long)size > 4u * 1024u * 1024u) {
+        fclose(f);
+        return reply_error(conn, 400, "file too large");
+    }
+    rewind(f);
+    char *data = malloc((size_t)size ? (size_t)size : 1);
+    if (!data) {
+        fclose(f);
+        return reply_error(conn, 500, "out of memory");
+    }
+    size_t got = fread(data, 1, (size_t)size, f);
+    fclose(f);
+    if (got != (size_t)size) {
+        free(data);
+        return reply_error(conn, 500, "short read");
+    }
+
+    struct MHD_Response *resp =
+        MHD_create_response_from_buffer((size_t)size, data, MHD_RESPMEM_MUST_FREE);
+    if (!resp) {
+        free(data);
+        return MHD_NO;
+    }
+    char disposition[256];
+    snprintf(disposition, sizeof(disposition), "attachment; filename=\"%s\"", name);
+    MHD_add_response_header(resp, MHD_HTTP_HEADER_CONTENT_TYPE, "application/octet-stream");
+    MHD_add_response_header(resp, MHD_HTTP_HEADER_CONTENT_DISPOSITION, disposition);
+    MHD_add_response_header(resp, MHD_HTTP_HEADER_CACHE_CONTROL, "no-store");
+    MHD_add_response_header(resp, MHD_HTTP_HEADER_CONNECTION, "close");
+    enum MHD_Result ret = MHD_queue_response(conn, 200, resp);
+    MHD_destroy_response(resp);
+    return ret;
+}
+
+static enum MHD_Result api_ldn(struct MHD_Connection *conn) {
+    // Actions mirror the console flow: scan -> join -> send -> stop.
+    const char *action = MHD_lookup_connection_value(conn, MHD_GET_ARGUMENT_KIND, "action");
+    const char *start = MHD_lookup_connection_value(conn, MHD_GET_ARGUMENT_KIND, "start");
+    if (action) {
+        if (!strcmp(action, "scan")) {
+            ldn_route_scan();
+        } else if (!strcmp(action, "join")) {
+            const char *idx = MHD_lookup_connection_value(conn, MHD_GET_ARGUMENT_KIND, "index");
+            ldn_route_join(idx ? atoi(idx) : 0);
+        } else if (!strcmp(action, "send")) {
+            ldn_route_send_loader();
+        } else if (!strcmp(action, "stop")) {
+            ldn_route_stop();
+        }
+    } else if (start && (!strcmp(start, "1") || !strcmp(start, "true"))) {
+        ldn_route_scan();
+    }
+
+    sb_t b = {0};
+    sb_add(&b, "{\"ok\":true,\"active\":");
+    sb_add(&b, ldn_route_active() ? "true" : "false");
+    sb_add(&b, ",\"connected\":");
+    sb_add(&b, ldn_route_connected() ? "true" : "false");
+    sb_add(&b, ",\"status\":");
+    sb_json(&b, ldn_route_status());
+    sb_add(&b, ",\"lobbies\":[");
+    int n = ldn_route_scan_count();
+    for (int i = 0; i < n; i++) {
+        const LdnLobbyInfo *li = ldn_route_scan_item(i);
+        if (!li) break;
+        if (i) sb_add(&b, ",");
+        sb_add(&b, "{\"ssid\":");
+        sb_json(&b, li->ssid[0] ? li->ssid : "(hidden)");
+        sb_addf(&b, ",\"players\":%d,\"max\":%d,\"channel\":%d,\"link\":%d,\"joinable\":%s,\"problem\":",
+                (int)li->node_count, (int)li->node_count_max, (int)li->channel,
+                (int)li->link_level, li->joinable ? "true" : "false");
+        sb_json(&b, li->problem);
+        sb_add(&b, "}");
+    }
+    sb_add(&b, "]}");
+    return reply_json(conn, 200, &b);
+}
+
 static enum MHD_Result api_ktest(struct MHD_Connection *conn) {
     app_request_ktest();
     sb_t b = {0};
@@ -510,9 +681,15 @@ static enum MHD_Result dispatch(struct MHD_Connection *conn, const char *url, co
     if (get && !strcmp(url, "/api/log")) return api_log(conn);
     if (post && !strcmp(url, "/api/ktest")) return api_ktest(conn);
     if (get && !strcmp(url, "/api/files")) return api_files(conn);
+    if (get && !strcmp(url, "/api/download")) return api_download(conn);
+    if (get && !strcmp(url, "/api/ldn")) return api_ldn(conn);
+    if (post && !strcmp(url, "/api/ldn")) return api_ldn(conn);
     if (post && !strcmp(url, "/api/start")) return api_start(conn);
     if (post && !strcmp(url, "/api/cancel")) return api_cancel(conn);
     if (post && !strcmp(url, "/api/settings")) return api_settings(conn);
+    if ((get || post) && !strcmp(url, "/api/live")) return api_live(conn);
+    if (post && !strcmp(url, "/api/live/key")) return api_live_key(conn);
+    if (post && !strcmp(url, "/api/live/pad")) return api_live_pad(conn);
 
     if (!strncmp(url, "/api/", 5)) {
         return reply_error(conn, get || post ? 404 : 405, "unknown endpoint");
@@ -600,7 +777,7 @@ static void *serve(void *arg) {
         MHD_start_daemon(MHD_USE_THREAD_PER_CONNECTION | MHD_USE_INTERNAL_POLLING_THREAD |
                              MHD_USE_POLL | MHD_USE_ERROR_LOG,
                          g_port, NULL, NULL, &on_request, NULL,
-                         MHD_OPTION_CONNECTION_TIMEOUT, (unsigned int)15,
+                         MHD_OPTION_CONNECTION_TIMEOUT, (unsigned int)5,
                          MHD_OPTION_CONNECTION_LIMIT, (unsigned int)16,
                          MHD_OPTION_NOTIFY_COMPLETED, &on_completed, NULL,
                          MHD_OPTION_THREAD_STACK_SIZE, (size_t)(160 * 1024),
@@ -612,7 +789,7 @@ static void *serve(void *arg) {
     pthread_mutex_lock(&g_lock);
     g_running = 1;
     pthread_mutex_unlock(&g_lock);
-    while (!g_stop) usleep(200000);
+    while (!g_stop) usleep(50000);
     MHD_stop_daemon(daemon);
     pthread_mutex_lock(&g_lock);
     g_running = 0;
@@ -643,10 +820,14 @@ int httpd_start(unsigned short port) {
     return -1;
 }
 
+void httpd_request_stop(void) {
+    g_stop = 1;
+}
+
 void httpd_stop(void) {
     app_exit_trace("httpd_stop: begin running=%d", g_running);
     g_stop = 1;
-    for (int i = 0; i < 1000 && g_running; i++) usleep(10000);
+    for (int i = 0; i < 400 && g_running; i++) usleep(10000);
     app_exit_trace("httpd_stop: end running=%d", g_running);
 }
 

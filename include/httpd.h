@@ -4,5 +4,6 @@
 
 int httpd_start(unsigned short port);
 void httpd_stop(void);
+void httpd_request_stop(void);
 bool httpd_running(void);
 unsigned short httpd_port(void);

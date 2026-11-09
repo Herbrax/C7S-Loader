@@ -14,6 +14,8 @@ typedef struct {
     int declared_count;
     bool header_valid;
     bool count_mismatch;
+    bool plain;
+    bool script;
     char title[128];
     char filename[128];
     char error[192];
