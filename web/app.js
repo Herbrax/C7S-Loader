@@ -483,7 +483,9 @@ function wire() {
   $("savePort").addEventListener("click", savePort);
   $("port").addEventListener("keydown", (e) => { if (e.key === "Enter") savePort(); });
   $("ktestBtn").addEventListener("click", keyboardTest);
-  $("ldnStart").addEventListener("click", startLdn);
+  $("ldnScan").addEventListener("click", () => ldnAction("scan"));
+  $("ldnSend").addEventListener("click", () => ldnAction("send"));
+  $("ldnStop").addEventListener("click", () => ldnAction("stop"));
   $("nroBrowse").addEventListener("click", () => $("nroFile").click());
   $("nroUpload").addEventListener("click", uploadUpdate);
   $("nroFile").addEventListener("change", () => {
@@ -496,21 +498,89 @@ function wire() {
   drop.addEventListener("drop", (e) => upload(e.dataTransfer.files && e.dataTransfer.files[0]));
 }
 
+/* ---------- LDN ----------
+   Note: scanning hands the Wi-Fi to the ldn service, which stops THIS web
+   server. So once LDN is active the page can no longer reach the device --
+   we detect the dropped poll and say so; control continues on the TV. */
+let ldnWasActive = false;
+
+function ldnBars(level) {
+  const lv = Math.max(0, Math.min(4, level | 0));
+  let s = '<span class="bars">';
+  for (let i = 0; i < 4; i++) s += `<i class="${i < lv ? "on" : ""}" style="height:${5 + i * 3}px"></i>`;
+  return s + "</span>";
+}
+
+const WIFI_SVG = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M4.5 9.5a10 10 0 0 1 15 0M7.5 13a6 6 0 0 1 9 0M10.5 16.5a2.5 2.5 0 0 1 3 0M12 20h.01"/></svg>';
+
+function renderLdn(d) {
+  ldnWasActive = !!d.active;
+  const banner = $("ldnBanner");
+  const connected = !!d.connected, active = !!d.active;
+  let phase = "IDLE", cls = "";
+  if (connected) { phase = "REGISTERED"; cls = "done busy"; }
+  else if (active) { phase = "CONNECTING"; cls = "active busy"; }
+  else if (d.lobbies && d.lobbies.length) phase = "FOUND";
+  banner.className = "ldnbanner " + cls;
+  $("ldnPhase").textContent = phase;
+  $("ldnStatus").textContent = d.status || "Idle";
+  $("ldnDot").className = "dot" + (connected ? " ok" : active ? " warn" : d.lobbies && d.lobbies.length ? " warn" : "");
+  $("ldnStop").classList.toggle("hidden", !active);
+  $("ldnScan").disabled = active;
+  $("ldnScan").textContent = (d.lobbies && d.lobbies.length) ? "Rescan" : "Scan";
+
+  const send = $("ldnSend");
+  send.disabled = !connected;
+  send.textContent = connected ? "Send RemoteJSLoader" : "Register in a lobby first";
+
+  const web = $("ldnWeb");
+  web.innerHTML = active
+    ? '<span class="dot warn"></span>Web server paused while LDN runs — drive it from the TV'
+    : '<span class="dot ok"></span>Web server running';
+
+  const list = $("ldnList");
+  const lob = d.lobbies || [];
+  if (!lob.length) {
+    list.innerHTML = active
+      ? '<div class="empty"><div class="big">Scanning…</div><div>Looking for Civ 7 lobbies on the local wireless.</div></div>'
+      : '<div class="empty"><div class="big">No lobbies yet</div><div>Open the Civ 7 wireless lobby on the Switch 2, then Scan.</div></div>';
+    return;
+  }
+  list.innerHTML = lob.map((l, i) => {
+    const reg = connected && i === 0; // host joined is always index 0 here
+    const stateTxt = reg ? "Registered" : l.joinable ? "Register" : (l.problem || "Unavailable");
+    const stateCol = reg ? "var(--ok)" : l.joinable ? "var(--accent)" : "var(--err)";
+    const icol = l.joinable ? "#3ccf91" : "#8e9ab3";
+    return `<div class="file lobby ${l.joinable ? "joinable" : ""}" data-i="${i}"${l.joinable && !active ? "" : ' style="cursor:default"'}>
+      <div class="fi" style="background:rgba(47,140,255,.12);color:${icol}">${WIFI_SVG}</div>
+      <div class="fmid"><div class="nm">${esc(l.ssid || "(hidden)")}</div>
+        <div class="mt">${l.players}/${l.max} players · ch ${l.channel}</div></div>
+      <div class="right">${ldnBars(l.link)}<span class="state" style="color:${stateCol}">${esc(stateTxt)}</span></div>
+    </div>`;
+  }).join("");
+  for (const row of list.querySelectorAll(".lobby.joinable")) {
+    row.addEventListener("click", () => { if (!ldnWasActive) ldnAction("join&index=" + row.dataset.i); });
+  }
+}
+
 async function pollLdn() {
   try {
     const d = await jsonFetch("/api/ldn");
-    $("ldnStatus").textContent = d.status || "idle";
-    $("ldnLog").textContent = d.log || "";
-    const b = $("ldnStart");
-    if (b) { b.disabled = !!d.active; b.textContent = d.active ? "LDN running" : "Start LDN"; }
-  } catch (e) {}
+    renderLdn(d);
+  } catch (e) {
+    // The web server is likely down because LDN took the Wi-Fi.
+    if (ldnWasActive) {
+      $("ldnBanner").className = "ldnbanner active busy";
+      $("ldnPhase").textContent = "LDN RUNNING";
+      $("ldnStatus").textContent = "Web server paused — continue on the TV, or Stop LDN there to reconnect.";
+      $("ldnStop").classList.add("hidden");
+    }
+  }
 }
 
-async function startLdn() {
-  const b = $("ldnStart");
-  if (b) { b.disabled = true; b.textContent = "Starting..."; }
-  try { await jsonFetch("/api/ldn?start=1", { method: "POST" }); } catch (e) {}
-  setTimeout(pollLdn, 300);
+async function ldnAction(action) {
+  try { await jsonFetch("/api/ldn?action=" + action, { method: "POST" }); } catch (e) {}
+  setTimeout(pollLdn, 250);
 }
 
 async function boot() {

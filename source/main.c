@@ -40,7 +40,6 @@ int main(int argc, char **argv) {
     mkdir("sdmc:/switch/plume-usb", 0777);
     preload_payloads();
     update_init(envHasArgv() ? (const char *)envGetArgv() : NULL);
-    ldn_route_init();
 
     char ip[64];
     local_ip(ip, sizeof(ip));
@@ -51,6 +50,14 @@ int main(int argc, char **argv) {
     carry_init();
     record_init();
     if (file_exists(C7S_DEFAULT_FILE)) app_set_selected(C7S_DEFAULT_FILE);
+
+    // Probe LDN at boot, then immediately hand the radio back so normal
+    // Wi-Fi reconnects and the web server can come up -- same as pressing
+    // Stop on the LDN tab. A later scan re-initialises the service on demand.
+    ldn_route_init();
+    ldn_route_stop();
+    local_ip(ip, sizeof(ip));
+    app_set_ip(ip);
 
     Result rc = usb_composite_init();
     bool worker = false;
@@ -69,7 +76,7 @@ int main(int argc, char **argv) {
     c7s_ui_run();
     app_exit_trace("main: ui returned");
     ldn_route_shutdown();
-
+    temp_ftp_stop();
     httpd_stop();
     app_exit_trace("main: httpd stopped");
     if (worker) usb_worker_stop();

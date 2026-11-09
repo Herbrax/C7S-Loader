@@ -14,6 +14,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,6 +31,15 @@ typedef struct {
     int pasv;
     char cwd[512];
 } FtpClient;
+
+static volatile bool g_stop;
+static volatile bool g_running;
+static int g_server = -1;
+/* The control/data sockets of the one client accept() is servicing, so a
+ * stop can shut them down and wake client_loop() out of a blocking recv().
+ * Only ftp_thread accepts, so at most one client is live at a time. */
+static volatile int g_client_ctrl = -1;
+static volatile int g_client_pasv = -1;
 
 static void reply(int fd, const char *line) {
     send(fd, line, strlen(line), 0);
@@ -58,9 +68,18 @@ static int pasv_open(uint16_t *port_out) {
 
 static int data_accept(FtpClient *c) {
     if (c->pasv < 0) return -1;
-    int fd = accept(c->pasv, NULL, NULL);
+    /* Poll so a stop (or a client that never dials in) can't park us here
+     * forever holding the data socket. */
+    int fd = -1;
+    for (int waited = 0; waited < 10000 && !g_stop; waited += 200) {
+        struct pollfd pfd = {.fd = c->pasv, .events = POLLIN};
+        int pr = poll(&pfd, 1, 200);
+        if (pr > 0) { fd = accept(c->pasv, NULL, NULL); break; }
+        if (pr < 0) break;
+    }
     close(c->pasv);
     c->pasv = -1;
+    g_client_pasv = -1;
     return fd;
 }
 
@@ -143,6 +162,7 @@ static void client_loop(FtpClient *c) {
             if (c->pasv >= 0) close(c->pasv);
             uint16_t port = 0;
             c->pasv = pasv_open(&port);
+            g_client_pasv = c->pasv;
             if (c->pasv < 0) {
                 reply(c->ctrl, "425 Can't open passive\r\n");
             } else if (!strcmp(cmd, "EPSV")) {
@@ -222,22 +242,59 @@ static void *ftp_thread(void *arg) {
     a.sin_port = htons(TEMP_FTP_PORT);
     if (bind(server, (struct sockaddr *)&a, sizeof(a)) < 0 || listen(server, 2) < 0) {
         close(server);
+        g_running = false;
         return NULL;
     }
-    for (;;) {
+    g_server = server;
+    /* Poll the listener with a timeout instead of blocking in accept(). On
+     * libnx a close()/shutdown() from another thread does not reliably wake
+     * a blocked accept(), so without this the thread could sit here holding
+     * a socket when socketExit() runs on the way out -- the exact crash we
+     * are avoiding. Polling lets the thread notice g_stop within 200ms and
+     * close its own socket. */
+    while (!g_stop) {
+        struct pollfd pfd = {.fd = server, .events = POLLIN};
+        int pr = poll(&pfd, 1, 200);
+        if (pr <= 0) continue;  /* timeout or error -> re-check g_stop */
         int fd = accept(server, NULL, NULL);
         if (fd < 0) continue;
         FtpClient c;
         memset(&c, 0, sizeof(c));
         c.ctrl = fd;
         c.pasv = -1;
+        g_client_ctrl = fd;
         client_loop(&c);
+        g_client_ctrl = -1;
+        g_client_pasv = -1;
         if (c.pasv >= 0) close(c.pasv);
         close(fd);
     }
+    close(server);
+    g_server = -1;
+    g_running = false;
+    return NULL;
 }
 
 void temp_ftp_start(void) {
+    g_stop = false;
+    g_running = true;
     pthread_t th;
-    if (pthread_create(&th, NULL, ftp_thread, NULL) == 0) pthread_detach(th);
+    if (pthread_create(&th, NULL, ftp_thread, NULL) == 0) {
+        pthread_detach(th);
+    } else {
+        g_running = false;
+    }
 }
+
+void temp_ftp_stop(void) {
+    g_stop = true;
+    /* The listener exits its poll loop on its own; here we only wake a
+     * client parked in recv() on a connected socket (shutdown() is reliable
+     * for connected sockets). The owning thread closes the fds. */
+    int c = g_client_ctrl;
+    if (c >= 0) shutdown(c, SHUT_RDWR);
+    int p = g_client_pasv;
+    if (p >= 0) shutdown(p, SHUT_RDWR);
+}
+
+bool temp_ftp_running(void) { return g_running; }

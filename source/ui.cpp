@@ -21,6 +21,7 @@ extern "C" {
 #include "live.h"
 #include "record.h"
 #include "settings.h"
+#include "temp_ftp.h"
 #include "update.h"
 #include "switch_init.h"
 #include "usb_composite.h"
@@ -75,6 +76,7 @@ enum Action {
     ACT_SQUARE,
     ACT_TRIANGLE,
     ACT_L1,
+    ACT_L2,
     ACT_R1,
     ACT_OPTIONS,
     ACT_TOUCHPAD,
@@ -171,6 +173,7 @@ float button(float x, float y, float s, Action a) {
             return s;
         }
         case ACT_L1: label = "L"; break;
+        case ACT_L2: label = "ZL"; break;
         case ACT_R1: label = "R"; break;
         case ACT_UP:
         case ACT_DOWN:
@@ -293,6 +296,7 @@ struct Input {
     bool a = false, b = false, x = false, y = false, plus = false, minus = false;
     bool l = false, r = false, zl = false, zr = false;
     bool plus_held = false;
+    bool minus_held = false;
     bool touch = false;
     bool touch_down = false, touch_up = false, touch_held = false;
     float tx = 0, ty = 0;
@@ -344,10 +348,19 @@ int g_preview_count = 0;
 char g_preview_name[160] = {0};
 
 Rect g_tab_rects[4];
-Rect g_ldn_start_rect;
-Rect g_ldn_log_btn;
-bool g_ldn_log_full = false;
-int g_ldn_log_scroll = 0;
+Rect g_ldn_scan_rect;
+Rect g_ldn_stop_rect;
+Rect g_ldn_send_rect;
+Rect g_ldn_row_rects[24];
+int g_ldn_row_count = 0;
+int g_ldn_selected = 0;
+Rect g_web_rect;
+Rect g_menu_item_rects[8];
+int g_menu_item_count = 0;
+int g_menu_sel = 0;
+enum MenuPage { MENU_NONE, MENU_ROOT, MENU_SETTINGS, MENU_ABOUT };
+MenuPage g_menu = MENU_NONE;
+uint64_t g_minus_start = 0;
 Rect g_row_rects[64];
 Rect g_start_rect;
 Rect g_refresh_rect;
@@ -474,6 +487,7 @@ Input poll_input() {
     in.plus = (down & HidNpadButton_Plus) != 0;
     in.plus_held = (cur & HidNpadButton_Plus) != 0;
     in.minus = (down & HidNpadButton_Minus) != 0;
+    in.minus_held = (cur & HidNpadButton_Minus) != 0;
 
     HidTouchScreenState ts{};
     bool has_touch = g_touch_ready && hidGetTouchScreenStates(&ts, 1) && ts.count > 0;
@@ -631,7 +645,7 @@ void draw_top(const C7sAppSnapshot &s, const UsbCompositeStatus *u) {
     ImU32 dot = (!u || !u->initialized) ? draw::ERR : usb_ok ? draw::OK : draw::ACCENT2;
     float cw = draw::text_size(22, usb_txt, true).x + 50;
     float cx = W - MARGIN - cw;
-    draw::pill(cx, 34, usb_txt, dot);
+    if (g_tab != TAB_LDN) draw::pill(cx, 34, usb_txt, dot);
 
     if (record_active()) {
         const char *rc = "REC";
@@ -667,8 +681,16 @@ void format_size(long long n, char *buf, size_t len) {
     else snprintf(buf, len, "%.1f MB", (double)n / (1024.0 * 1024.0));
 }
 
+bool has_net_ip(const C7sAppSnapshot &s) {
+    return s.ip[0] && strcmp(s.ip, "unknown") != 0;
+}
+
 void web_url(const C7sAppSnapshot &s, char *buf, size_t len) {
-    snprintf(buf, len, "http://%s:%u", s.ip[0] && strcmp(s.ip, "unknown") ? s.ip : "console", (unsigned)s.port);
+    if (!has_net_ip(s)) {
+        snprintf(buf, len, "Connect to a network to use Web Server");
+        return;
+    }
+    snprintf(buf, len, "http://%s:%u", s.ip, (unsigned)s.port);
 }
 
 // ---------- SEND ----------
@@ -747,8 +769,10 @@ void draw_send(const C7sAppSnapshot &s, const UsbCompositeStatus *u) {
         draw::text(dx + 28, dy + 70, 28, draw::MUTED, "Nothing to send yet.");
         char url[160];
         web_url(s, url, sizeof(url));
-        draw::text(dx + 28, dy + 120, 26, draw::MUTED, "Open the web app:");
-        draw::text_clip(dx + 28, dy + 154, 28, draw::ACCENT, url, dw - 56);
+        draw::text(dx + 28, dy + 120, 26, draw::MUTED,
+                   has_net_ip(s) ? "Open the web app:" : "");
+        draw::text_clip(dx + 28, dy + 154, has_net_ip(s) ? 28 : 24,
+                        has_net_ip(s) ? draw::ACCENT : draw::GOLD, url, dw - 56);
     } else {
         C7sEntry &e = g_entries[g_cursor];
         Mode m = g_modes[g_cursor];
@@ -925,16 +949,19 @@ void draw_connect(const C7sAppSnapshot &s, const UsbCompositeStatus *u) {
     draw::text(lx + 28, ly + 74, 36, draw::TEXT, "Open on a phone or PC", true);
     char url[160];
     web_url(s, url, sizeof(url));
-    draw::text_clip(lx + 28, ly + 128, 56, httpd_running() ? draw::ACCENT : draw::ERR,
-                    httpd_running() ? url : "web server offline", lw - 56);
+    bool net = has_net_ip(s);
+    draw::text_clip(lx + 28, ly + 128, net ? 56 : 36,
+                    net ? (httpd_running() ? draw::ACCENT : draw::ERR) : draw::GOLD,
+                    net ? (httpd_running() ? url : "web server offline") : url, lw - 56);
     draw::text(lx + 28, ly + 200, 26, draw::MUTED, "The device must be on the same Wi-Fi as this Switch.");
     draw::text(lx + 28, ly + 240, 26, draw::MUTED, "Upload scripts, type from a real keyboard, record macros.");
 
-    g_port_rect = {lx + 28, ly + lh - 110, 320, 72};
-    draw::accent_button(g_port_rect.x, g_port_rect.y, g_port_rect.w, g_port_rect.h, "Change port", false);
-    char pl[48];
-    snprintf(pl, sizeof(pl), "Port %u", (unsigned)s.port);
-    draw::text(g_port_rect.x + g_port_rect.w + 24, g_port_rect.y + (72 - 28) / 2, 28, draw::MUTED, pl);
+    g_web_rect = {lx + 28, ly + lh - 110, 380, 72};
+    draw::accent_button(g_web_rect.x, g_web_rect.y, g_web_rect.w, g_web_rect.h,
+                        httpd_running() ? "Restart web server" : "Trigger web server", true);
+    char pl[64];
+    snprintf(pl, sizeof(pl), "Port %u (change in Menu > Settings)", (unsigned)s.port);
+    draw::text(g_web_rect.x + g_web_rect.w + 24, g_web_rect.y + (72 - 28) / 2, 26, draw::MUTED, pl);
 
     float rx = lx + lw + COL_GAP, ry = CONTENT_Y, rw = W - MARGIN - rx, rh = CONTENT_H;
     draw::panel(rx, ry, rw, rh);
@@ -955,11 +982,8 @@ void draw_connect(const C7sAppSnapshot &s, const UsbCompositeStatus *u) {
     snprintf(fr, sizeof(fr), "%u", u ? (unsigned)u->reports_failed : 0);
     kv_row(kx, ky + 168, kw, "Failed reports", fr, draw::TEXT);
 
-    g_ktest_rect = {rx + 28, ry + rh - 110, rw - 56, 72};
-    draw::accent_button(g_ktest_rect.x, g_ktest_rect.y, g_ktest_rect.w, g_ktest_rect.h, "Test keyboard - types \"hello\"", false);
-
-    Hint hints[] = {{ACT_TRIANGLE, "Port"}, {ACT_SQUARE, "Test keyboard"}, {ACT_L1, ""}, {ACT_R1, "Switch tab"}};
-    draw_bottom(hints, 4);
+    Hint hints[] = {{ACT_TRIANGLE, "Web server"}, {ACT_L1, ""}, {ACT_R1, "Switch tab"}};
+    draw_bottom(hints, 3);
 }
 
 // ---------- LIVE ----------
@@ -1103,24 +1127,13 @@ void draw_live_key(const LiveKey &k, int i) {
 void draw_live(const C7sAppSnapshot &s, const UsbCompositeStatus *u) {
     (void)u;
     g_live_key_count = 0;
-    float px = MARGIN, py = CONTENT_Y, pw = W - 2 * MARGIN, ph = CONTENT_H;
+    float px = MARGIN, py = CONTENT_Y, pw = W - 2 * MARGIN;
+    float live_bottom = H - 24.0f;
+    float ty = py, segh = 72;
 
-    // toolbar
-    float ty = py;
-    // segment Keyboard | Gamepad
-    float segw = 460, segh = 72;
-    draw::rect(px, ty, segw, segh, draw::PANEL2, 16);
-    draw::frame(px, ty, segw, segh, draw::LINE, 16, 1.2f);
-    g_kbdtab_rect = {px + 6, ty + 6, segw / 2 - 6, segh - 12};
-    g_padtab_rect = {px + segw / 2, ty + 6, segw / 2 - 6, segh - 12};
-    if (g_liveview == LV_KBD) { draw::rect(g_kbdtab_rect.x, g_kbdtab_rect.y, g_kbdtab_rect.w, g_kbdtab_rect.h, IM_COL32(33, 45, 72, 255), 12); }
-    else { draw::rect(g_padtab_rect.x, g_padtab_rect.y, g_padtab_rect.w, g_padtab_rect.h, IM_COL32(33, 45, 72, 255), 12); }
-    ImVec2 k1 = draw::text_size(28, "Keyboard", true);
-    draw::text(g_kbdtab_rect.x + (g_kbdtab_rect.w - k1.x) / 2, g_kbdtab_rect.y + (g_kbdtab_rect.h - k1.y) / 2, 28, g_liveview == LV_KBD ? draw::TEXT : draw::MUTED, "Keyboard", true);
-    ImVec2 k2 = draw::text_size(28, "Gamepad", true);
-    draw::text(g_padtab_rect.x + (g_padtab_rect.w - k2.x) / 2, g_padtab_rect.y + (g_padtab_rect.h - k2.y) / 2, 28, g_liveview == LV_PAD ? draw::TEXT : draw::MUTED, "Gamepad", true);
+    draw::text(px, ty + (segh - 32) / 2, 32, draw::TEXT, "Keyboard + Gamepad", true);
 
-    // right-aligned controls: carry toggle, record, release
+    // right-aligned controls
     float rel_w = 190, rec_w = 210, carry_w = 420;
     float cx = px + pw - rel_w;
     live_add(cx, ty, rel_w, segh, "Release all", LK_RELEASE);
@@ -1128,100 +1141,99 @@ void draw_live(const C7sAppSnapshot &s, const UsbCompositeStatus *u) {
     live_add(cx, ty, rec_w, segh, record_active() ? "Stop recording" : "Record", LK_RECORD);
     cx -= carry_w + 14;
     live_add(cx, ty, carry_w, segh, "", LK_CARRY);
-    float carry_x = cx;
 
     float body_y = ty + segh + 20;
-
-    // pass-through banner
     if (carry_enabled()) {
         float bh = 60;
         draw::rect(px, body_y, pw, bh, IM_COL32(217, 182, 94, 32), 12);
         draw::frame(px, body_y, pw, bh, IM_COL32(217, 182, 94, 140), 12, 1.5f);
-        draw::text(px + 20, body_y + (bh - 27) / 2, 27, draw::GOLD, "Joy-Con pass-through is on - use the touchscreen to control this app.", true);
+        draw::text(px + 20, body_y + (bh - 27) / 2, 27, draw::GOLD,
+                   "Joy-Con pass-through is on - use the touchscreen to control this app.", true);
         body_y += bh + 16;
     }
 
-    if (g_liveview == LV_KBD) {
-        draw::panel(px, body_y, pw, ph - (body_y - py));
-        float kx = px + 20, ky = body_y + 24;
-        float kw = (pw - 40 - 13 * 10) / 14.0f;
-        float kh = 92, kg = 10;
+    float body_h = live_bottom - body_y;
+    float gap = 16;
+    float game_h = body_h * 0.38f;
+    if (game_h < 240) game_h = 240;
+    float kbd_h = body_h - game_h - gap;
 
-        static const char *r1l[] = {"`", "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "=", "Back"};
-        static const uint8_t r1k[] = {53, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 45, 46, 42};
-        static const char *r2l[] = {"Tab", "q", "w", "e", "r", "t", "y", "u", "i", "o", "p", "[", "]", "\\"};
-        static const uint8_t r2k[] = {43, 20, 26, 8, 21, 23, 28, 24, 12, 18, 19, 47, 48, 49};
-        static const char *r3l[] = {"Esc", "a", "s", "d", "f", "g", "h", "j", "k", "l", ";", "'", "Enter", ""};
-        static const uint8_t r3k[] = {41, 4, 22, 7, 9, 10, 11, 13, 14, 15, 51, 52, 40, 0};
-        static const char *r4l[] = {"z", "x", "c", "v", "b", "n", "m", ",", ".", "/", "Up", "Left", "Down", "Right"};
-        static const uint8_t r4k[] = {29, 27, 6, 25, 5, 17, 16, 54, 55, 56, 82, 80, 81, 79};
+    // ---------- gamepad (top) ----------
+    draw::panel(px, body_y, pw, game_h);
+    draw::text(px + 18, body_y + 10, 22, draw::MUTED, "GAMEPAD", true);
 
-        auto row = [&](const char *labels[], const uint8_t keys[], int n, float y) {
-            for (int i = 0; i < n; i++) {
-                if (!labels[i][0]) continue;
-                live_add(kx + i * (kw + kg), y, kw, kh, labels[i], LK_KEY, 0, keys[i]);
-            }
-        };
-        row(r1l, r1k, 14, ky);
-        row(r2l, r2k, 14, ky + (kh + kg));
-        row(r3l, r3k, 13, ky + 2 * (kh + kg));
-        row(r4l, r4k, 14, ky + 3 * (kh + kg));
+    float sh_y = body_y + 34, sh_w = 132, sh_h = 52, sh_g = 14;
+    const char *shl[] = {"L", "ZL", "R", "ZR"};
+    uint16_t shb[] = {SWITCH_BTN_L, SWITCH_BTN_ZL, SWITCH_BTN_R, SWITCH_BTN_ZR};
+    float sh_total = 4 * sh_w + 3 * sh_g;
+    float sh_x = px + pw / 2 - sh_total / 2;
+    for (int i = 0; i < 4; i++) live_add(sh_x + i * (sh_w + sh_g), sh_y, sh_w, sh_h, shl[i], LK_PAD, 0, 0, shb[i]);
 
-        float y5 = ky + 4 * (kh + kg);
-        live_add(kx, y5, kw * 2 + kg, kh, "Ctrl", LK_MOD, 1);
-        live_add(kx + 2 * (kw + kg), y5, kw * 2 + kg, kh, "Alt", LK_MOD, 4);
-        live_add(kx + 4 * (kw + kg), y5, kw * 2 + kg, kh, "Shift", LK_MOD, 2);
-        live_add(kx + 6 * (kw + kg), y5, kw * 4 + 3 * kg, kh, "Space", LK_KEY, 0, 44);
-        live_add(kx + 10 * (kw + kg), y5, kw * 2 + kg, kh, "Alt+Enter", LK_SHORTCUT, 4, 40);
-        live_add(kx + 12 * (kw + kg), y5, kw * 2 + kg, kh, "Alt+Esc", LK_SHORTCUT, 4, 41);
-    } else {
-        draw::panel(px, body_y, pw, ph - (body_y - py));
-        float cxp = px + pw / 2;
-        // dpad left
-        float dcx = px + 220, dcy = body_y + 230;
-        float db = 96;
-        live_add(dcx - db / 2, dcy - db - 6, db, db, "Up", LK_HAT, 0, 0, 0, SWITCH_HAT_UP);
-        live_add(dcx - db - 6 - db / 2, dcy, db, db, "Lt", LK_HAT, 0, 0, 0, SWITCH_HAT_LEFT);
-        live_add(dcx + 6 + db / 2, dcy, db, db, "Rt", LK_HAT, 0, 0, 0, SWITCH_HAT_RIGHT);
-        live_add(dcx - db / 2, dcy + db + 6, db, db, "Dn", LK_HAT, 0, 0, 0, SWITCH_HAT_DOWN);
-        draw::text(dcx - 60, dcy + 2 * db + 24, 22, draw::MUTED, "D-PAD");
+    float mid_y = body_y + game_h * 0.52f;
+    float dcx = px + 180, db = 60;
+    live_add(dcx - db / 2, mid_y - db - 4, db, db, "Up", LK_HAT, 0, 0, 0, SWITCH_HAT_UP);
+    live_add(dcx - db - 4 - db / 2, mid_y, db, db, "Lt", LK_HAT, 0, 0, 0, SWITCH_HAT_LEFT);
+    live_add(dcx + 4 + db / 2, mid_y, db, db, "Rt", LK_HAT, 0, 0, 0, SWITCH_HAT_RIGHT);
+    live_add(dcx - db / 2, mid_y + db + 4, db, db, "Dn", LK_HAT, 0, 0, 0, SWITCH_HAT_DOWN);
 
-        // face buttons right
-        float fcx = px + pw - 240, fcy = body_y + 230;
-        float fb = 120;
-        live_add(fcx - fb / 2, fcy - fb - 6, fb, fb, "X", LK_PAD, 0, 0, SWITCH_BTN_X);
-        live_add(fcx - fb - 6 - fb / 2, fcy, fb, fb, "Y", LK_PAD, 0, 0, SWITCH_BTN_Y);
-        live_add(fcx + 6 + fb / 2, fcy, fb, fb, "A", LK_PAD, 0, 0, SWITCH_BTN_A);
-        live_add(fcx - fb / 2, fcy + fb + 6, fb, fb, "B", LK_PAD, 0, 0, SWITCH_BTN_B);
-        draw::text(fcx - 60, fcy + 2 * fb + 24, 22, draw::MUTED, "BUTTONS");
+    float fcx = px + pw - 180, fb = 72;
+    live_add(fcx - fb / 2, mid_y - fb - 4, fb, fb, "X", LK_PAD, 0, 0, SWITCH_BTN_X);
+    live_add(fcx - fb - 4 - fb / 2, mid_y, fb, fb, "Y", LK_PAD, 0, 0, SWITCH_BTN_Y);
+    live_add(fcx + 4 + fb / 2, mid_y, fb, fb, "A", LK_PAD, 0, 0, SWITCH_BTN_A);
+    live_add(fcx - fb / 2, mid_y + fb + 4, fb, fb, "B", LK_PAD, 0, 0, SWITCH_BTN_B);
 
-        // shoulders row (centered top)
-        float sh_y = body_y + 40, sh_w = 150, sh_h = 72, sh_g = 16;
-        const char *shl[] = {"L", "ZL", "R", "ZR"};
-        uint16_t shb[] = {SWITCH_BTN_L, SWITCH_BTN_ZL, SWITCH_BTN_R, SWITCH_BTN_ZR};
-        float sh_total = 4 * sh_w + 3 * sh_g;
-        float sh_x = cxp - sh_total / 2;
-        for (int i = 0; i < 4; i++) live_add(sh_x + i * (sh_w + sh_g), sh_y, sh_w, sh_h, shl[i], LK_PAD, 0, 0, shb[i]);
+    float sy_y = body_y + game_h - 62, sy_w = 132, sy_h = 48, sy_g = 14;
+    const char *syl[] = {"-", "+", "L3", "R3"};
+    uint16_t syb[] = {SWITCH_BTN_MINUS, SWITCH_BTN_PLUS, SWITCH_BTN_L3, SWITCH_BTN_R3};
+    float sy_total = 4 * sy_w + 3 * sy_g;
+    float sy_x = px + pw / 2 - sy_total / 2;
+    for (int i = 0; i < 4; i++) live_add(sy_x + i * (sy_w + sy_g), sy_y, sy_w, sy_h, syl[i], LK_PAD, 0, 0, syb[i]);
 
-        // system row (centered middle). Home and Capture are intercepted by the
-        // console and never reach the target over USB, so they are not shown.
-        float sy_y = body_y + 170, sy_w = 150, sy_h = 72, sy_g = 16;
-        const char *syl[] = {"-", "+", "L3", "R3"};
-        uint16_t syb[] = {SWITCH_BTN_MINUS, SWITCH_BTN_PLUS, SWITCH_BTN_L3, SWITCH_BTN_R3};
-        float sy_total = 4 * sy_w + 3 * sy_g;
-        float sy_x = cxp - sy_total / 2;
-        for (int i = 0; i < 4; i++) live_add(sy_x + i * (sy_w + sy_g), sy_y, sy_w, sy_h, syl[i], LK_PAD, 0, 0, syb[i]);
+    // ---------- keyboard (below) ----------
+    float ky0 = body_y + game_h + gap;
+    draw::panel(px, ky0, pw, kbd_h);
+    draw::text(px + 18, ky0 + 10, 22, draw::MUTED, "KEYBOARD", true);
 
-        draw::text(cxp - draw::text_size(24, "Hold a button to keep it pressed.").x / 2, body_y + 300, 24, draw::MUTED, "Hold a button to keep it pressed.");
-    }
+    float kx = px + 20, ky = ky0 + 40;
+    float kw = (pw - 40 - 13 * 10) / 14.0f;
+    float kg = 8;
+    float kh = (kbd_h - 56 - 4 * kg) / 5.0f;
+    if (kh < 44) kh = 44;
 
-    (void)carry_x;
+    static const char *r1l[] = {"`", "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "=", "Back"};
+    static const uint8_t r1k[] = {53, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 45, 46, 42};
+    static const char *r2l[] = {"Tab", "q", "w", "e", "r", "t", "y", "u", "i", "o", "p", "[", "]", "\\"};
+    static const uint8_t r2k[] = {43, 20, 26, 8, 21, 23, 28, 24, 12, 18, 19, 47, 48, 49};
+    static const char *r3l[] = {"Esc", "a", "s", "d", "f", "g", "h", "j", "k", "l", ";", "'", "Enter", ""};
+    static const uint8_t r3k[] = {41, 4, 22, 7, 9, 10, 11, 13, 14, 15, 51, 52, 40, 0};
+    static const char *r4l[] = {"z", "x", "c", "v", "b", "n", "m", ",", ".", "/", "Up", "Left", "Down", "Right"};
+    static const uint8_t r4k[] = {29, 27, 6, 25, 5, 17, 16, 54, 55, 56, 82, 80, 81, 79};
+
+    auto row = [&](const char *labels[], const uint8_t keys[], int n, float y) {
+        for (int i = 0; i < n; i++) {
+            if (!labels[i][0]) continue;
+            live_add(kx + i * (kw + kg), y, kw, kh, labels[i], LK_KEY, 0, keys[i]);
+        }
+    };
+    row(r1l, r1k, 14, ky);
+    row(r2l, r2k, 14, ky + (kh + kg));
+    row(r3l, r3k, 13, ky + 2 * (kh + kg));
+    row(r4l, r4k, 14, ky + 3 * (kh + kg));
+
+    float y5 = ky + 4 * (kh + kg);
+    live_add(kx, y5, kw * 2 + kg, kh, "Ctrl", LK_MOD, 1);
+    live_add(kx + 2 * (kw + kg), y5, kw * 2 + kg, kh, "Alt", LK_MOD, 4);
+    live_add(kx + 4 * (kw + kg), y5, kw * 2 + kg, kh, "Shift", LK_MOD, 2);
+    live_add(kx + 6 * (kw + kg), y5, kw * 4 + 3 * kg, kh, "Space", LK_KEY, 0, 44);
+    live_add(kx + 10 * (kw + kg), y5, kw * 2 + kg, kh, "Alt+Enter", LK_SHORTCUT, 4, 40);
+    live_add(kx + 12 * (kw + kg), y5, kw * 2 + kg, kh, "Alt+Esc", LK_SHORTCUT, 4, 41);
+
     for (int i = 0; i < g_live_key_count; i++) draw_live_key(g_live_keys[i], i);
-    // overlay active state for carry/record toolbar buttons
     for (int i = 0; i < g_live_key_count; i++) {
         const LiveKey &k = g_live_keys[i];
         if ((k.kind == LK_CARRY && carry_enabled()) || (k.kind == LK_RECORD && record_active())) {
-            draw::frame(k.r.x, k.r.y, k.r.w, k.r.h, k.kind == LK_RECORD ? draw::RED_HOT : draw::ACCENT, 16, 2.5f);
+            draw::frame(k.r.x, k.r.y, k.r.w, k.r.h,
+                        k.kind == LK_RECORD ? draw::RED_HOT : draw::ACCENT, 16, 2.5f);
         }
         if (k.kind == LK_CARRY) {
             toggle_switch(k.r.x + 16, k.r.y + (k.r.h - 36) / 2, carry_enabled());
@@ -1229,54 +1241,216 @@ void draw_live(const C7sAppSnapshot &s, const UsbCompositeStatus *u) {
             draw::text(k.r.x + 92, k.r.y + (k.r.h - lt.y) / 2, 27, draw::TEXT, "Pass through Joy-Con", true);
         }
     }
+}
 
-    Hint hints[] = {{ACT_L1, ""}, {ACT_R1, "Switch tab"}};
-    draw_bottom(hints, 2);
+// Small signal-strength bars for a lobby's link level (0..3-ish).
+void link_bars(float x, float cy, int level, ImU32 col) {
+    int lv = level < 0 ? 0 : level > 4 ? 4 : level;
+    const float bw = 6, gap = 4;
+    for (int i = 0; i < 4; i++) {
+        float bh = 8.0f + i * 5.0f;
+        ImU32 c = (i < lv) ? col : draw::LINE;
+        draw::rect(x + i * (bw + gap), cy - bh / 2 + 6, bw, bh, c, 2);
+    }
 }
 
 void draw_ldn(const C7sAppSnapshot &s, const UsbCompositeStatus *u) {
     draw_top(s, u);
     float x = MARGIN, y = CONTENT_Y, w = W - 2 * MARGIN, h = CONTENT_H;
     draw::panel(x, y, w, h);
-    draw::text(x + 28, y + 22, 34, draw::TEXT, "LDN injection", true);
-    draw::text(x + 28, y + 78, 24, draw::MUTED,
-               "On the Switch 2: MULTIPLAYER > WIRELESS > CREATE GAME > HOST LOBBY (+).");
-    draw::text(x + 28, y + 110, 24, draw::MUTED,
-               "Keep the lobby open. The Switch 1 joins over local wireless. No prod.keys needed.");
-    bool active = ldn_route_active();
-    g_ldn_start_rect = {x + 28, y + 164, 320, 76};
-    draw::accent_button(g_ldn_start_rect.x, g_ldn_start_rect.y, g_ldn_start_rect.w,
-                        g_ldn_start_rect.h, active ? "LDN RUNNING" : "START LDN", true);
-    draw::text(x + 28, y + 272, 26, active ? draw::ACCENT : draw::TEXT, ldn_route_status(), true);
-    draw::text(x + 28, y + 318, 22, draw::MUTED, "LOG", true);
-    g_ldn_log_btn = {x + 28, y + 348, 220, 56};
-    draw::accent_button(g_ldn_log_btn.x, g_ldn_log_btn.y, g_ldn_log_btn.w,
-                        g_ldn_log_btn.h, "FULL LOG", true);
-    draw::text_clip(x + 270, y + 362, 18, draw::MUTED, ldn_route_log(), w - 300);
 
-    if (g_ldn_log_full) {
-        draw::rect(0, 0, W, H, draw::BG, 0);
-        draw::text(40, 30, 40, draw::TEXT, "LDN LOG", true);
-        draw::text(40, 80, 22, draw::MUTED, "Up/Down scroll - B close");
-        char buf[16384];
-        snprintf(buf, sizeof(buf), "%s", ldn_route_log());
-        int line = 0;
-        char *p = buf;
-        while (p && *p && line < 44) {
-            char *nl = strchr(p, '\n');
-            if (nl) *nl = '\0';
-            if (line >= g_ldn_log_scroll) {
-                draw::text_clip(40, 130 + (line - g_ldn_log_scroll) * 22, 18, draw::TEXT, p, W - 80);
-            }
-            line++;
-            if (!nl) break;
-            p = nl + 1;
-        }
-        Hint hints[] = {{ACT_CIRCLE, "Close"}};
-        draw_bottom(hints, 1);
+    const float px = x + 32;       // inner left padding
+    const float pw = w - 64;       // inner content width
+
+    draw::text(px, y + 22, 34, draw::TEXT, "LDN injection", true);
+    draw::text(px, y + 70, 22, draw::MUTED,
+               "Push the RemoteJSLoader straight into a Civ 7 wireless lobby over local", false);
+    draw::text(px, y + 98, 22, draw::MUTED,
+               "wireless -- no USB cable, no prod.keys.", false);
+
+    bool active = ldn_route_active();
+    bool connected = ldn_route_connected();
+    int count = ldn_route_scan_count();
+    bool web = httpd_running();
+
+    // ---- status banner -------------------------------------------------
+    float by = y + 136, bh = 64;
+    draw::rect(px, by, pw, bh, draw::PANEL2, 14);
+    draw::frame(px, by, pw, bh, draw::LINE, 14, 1.2f);
+    // Phase: idle / scanning / found / registering / registered / sending.
+    const char *phase;
+    ImU32 dot;
+    bool spin;
+    if (connected)            { phase = "REGISTERED"; dot = draw::OK;      spin = true; }
+    else if (active)          { phase = "CONNECTING"; dot = draw::ACCENT2; spin = true; }
+    else if (count > 0)       { phase = "FOUND";      dot = draw::ACCENT;  spin = false; }
+    else                      { phase = "IDLE";       dot = draw::MUTED;   spin = false; }
+    if (spin) draw::spinner(px + 34, by + bh / 2, 13, dot);
+    else draw::dl()->AddCircleFilled(ImVec2(px + 34, by + bh / 2), 8, dot, 16);
+    draw::text(px + 62, by + 12, 18, dot, phase, true);
+    draw::text_clip(px + 62, by + 32, 24, draw::TEXT, ldn_route_status(), pw - 90, true);
+
+    // ---- action buttons ------------------------------------------------
+    // State-based emphasis: the single next step glows. Scan is the call to
+    // action until a lobby is registered; then Send takes over.
+    float ay = by + bh + 22, abh = 64;
+    g_ldn_scan_rect = {px, ay, 300, abh};
+    draw::accent_button(g_ldn_scan_rect.x, g_ldn_scan_rect.y, g_ldn_scan_rect.w,
+                        g_ldn_scan_rect.h, count ? "RESCAN  (Y)" : "SCAN  (Y)", !active && !connected);
+    g_ldn_send_rect = {px + 324, ay, 470, abh};
+    if (connected) {
+        draw::accent_button(g_ldn_send_rect.x, g_ldn_send_rect.y, g_ldn_send_rect.w,
+                            g_ldn_send_rect.h, "SEND REMOTEJSLOADER  (X)", true);
     } else {
-        Hint hints[] = {{ACT_OPTIONS, "Hold + to exit"}};
-        draw_bottom(hints, 1);
+        // Reachable only once registered -- show it dimmed so the flow reads.
+        draw::rect(g_ldn_send_rect.x, g_ldn_send_rect.y, g_ldn_send_rect.w, g_ldn_send_rect.h, draw::PANEL, 12);
+        draw::frame(g_ldn_send_rect.x, g_ldn_send_rect.y, g_ldn_send_rect.w, g_ldn_send_rect.h, draw::LINE, 12, 1.2f);
+        ImVec2 ts = draw::text_size(30, "SEND REMOTEJSLOADER", true);
+        draw::text(g_ldn_send_rect.x + (g_ldn_send_rect.w - ts.x) / 2,
+                   g_ldn_send_rect.y + (abh - ts.y) / 2, 30, draw::MUTED, "SEND REMOTEJSLOADER", true);
+    }
+    g_ldn_stop_rect = {px + pw - 240, ay, 240, abh};
+    draw::red_button(g_ldn_stop_rect.x, g_ldn_stop_rect.y, g_ldn_stop_rect.w,
+                     g_ldn_stop_rect.h, "STOP  (B)", false);
+
+    // ---- setup hint + web-server state --------------------------------
+    float hy = ay + abh + 20;
+    draw::text(px, hy, 21, draw::MUTED,
+               "Switch 2:  MULTIPLAYER -> WIRELESS -> CREATE GAME -> HOST LOBBY (+),  keep it open, then Scan.", false);
+    draw::dl()->AddCircleFilled(ImVec2(px + 6, hy + 36), 5, web ? draw::OK : draw::GOLD, 12);
+    draw::text(px + 20, hy + 26, 21, web ? draw::OK : draw::GOLD,
+               web ? "Web server running" : "Web server paused while LDN runs -- it restarts when you Stop", false);
+
+    // ---- lobby list ----------------------------------------------------
+    float listy = hy + 64;
+    draw::text(px, listy, 20, draw::MUTED, "LOBBIES", true);
+    float ry = listy + 32;
+    g_ldn_row_count = 0;
+    for (int i = 0; i < count && i < 24; i++) {
+        const LdnLobbyInfo *li = ldn_route_scan_item(i);
+        if (!li) break;
+        if (ry + 62 > y + h - 20) break;
+        bool sel = (i == g_ldn_selected);
+        bool reg = connected && sel;
+        g_ldn_row_rects[g_ldn_row_count++] = {px, ry, pw, 58};
+        draw::rect(px, ry, pw, 58, sel ? IM_COL32(33, 45, 72, 255) : draw::PANEL2, 12);
+        draw::frame(px, ry, pw, 58,
+                    reg ? draw::OK : sel ? draw::ACCENT : (li->joinable ? draw::LINE : draw::ERR),
+                    12, sel ? 2.0f : 1.2f);
+        char line[160];
+        snprintf(line, sizeof(line), "%s", li->ssid[0] ? li->ssid : "(hidden)");
+        draw::text_clip(px + 22, ry + (58 - 26) / 2, 26, draw::TEXT, line, 460, true);
+        snprintf(line, sizeof(line), "%d/%d players   ch %d",
+                 (int)li->node_count, (int)li->node_count_max, (int)li->channel);
+        draw::text(px + 520, ry + (58 - 22) / 2, 22, draw::MUTED, line, false);
+        link_bars(px + 820, ry + 29, li->link_level, li->joinable ? draw::OK : draw::MUTED);
+        const char *rtxt = reg ? "REGISTERED" : li->joinable ? "A  REGISTER" : li->problem;
+        ImU32 rcol = reg ? draw::OK : li->joinable ? draw::ACCENT : draw::ERR;
+        ImVec2 rts = draw::text_size(22, rtxt, true);
+        draw::text(px + pw - 24 - rts.x, ry + (58 - 22) / 2, 22, rcol, rtxt, true);
+        ry += 58 + 8;
+    }
+    if (g_ldn_row_count == 0) {
+        draw::rect(px, ry, pw, 58, draw::PANEL2, 12);
+        draw::frame(px, ry, pw, 58, draw::LINE, 12, 1.2f);
+        draw::text(px + 22, ry + (58 - 22) / 2, 22, draw::MUTED,
+                   active ? "Scanning for Civ 7 lobbies..."
+                          : "No lobbies yet -- open the Switch 2 lobby, then Scan.", false);
+    }
+
+    Hint hints[] = {{ACT_UP, "Pick lobby"}, {ACT_CROSS, "Register"},
+                    {ACT_SQUARE, "Scan"}, {ACT_TRIANGLE, "Send"}};
+    draw_bottom(hints, 4);
+}
+
+void open_menu() {
+    g_menu = MENU_ROOT;
+    g_menu_sel = 0;
+}
+
+void draw_menu() {
+    draw::rect(0, 0, W, H, IM_COL32(0, 0, 0, 180), 0);
+    float mw = 820, mh = 620, mx = (W - mw) / 2, my = (H - mh) / 2;
+    draw::panel(mx, my, mw, mh);
+    g_menu_item_count = 0;
+
+    if (g_menu == MENU_ROOT) {
+        draw::text(mx + 40, my + 32, 42, draw::TEXT, "C7S-Loader", true);
+        const char *items[] = {"Settings", "About C7S-Loader"};
+        for (int i = 0; i < 2; i++) {
+            float ry = my + 130 + i * 96;
+            g_menu_item_rects[g_menu_item_count++] = {mx + 40, ry, mw - 80, 76};
+            bool on = i == g_menu_sel;
+            draw::rect(mx + 40, ry, mw - 80, 76, on ? IM_COL32(33, 45, 72, 255) : draw::PANEL2, 14);
+            draw::frame(mx + 40, ry, mw - 80, 76, on ? draw::ACCENT : draw::LINE, 14, on ? 2.0f : 1.2f);
+            draw::text(mx + 68, ry + (76 - 32) / 2, 32, on ? draw::WHITE : draw::TEXT, items[i], true);
+        }
+        draw::text(mx + 40, my + mh - 64, 22, draw::MUTED, "Up/Down select  A open  B close", true);
+    } else if (g_menu == MENU_SETTINGS) {
+        draw::text(mx + 40, my + 32, 40, draw::TEXT, "Settings", true);
+        draw::text(mx + 40, my + 104, 24, draw::MUTED, "Web server port", true);
+        char port[16];
+        snprintf(port, sizeof(port), "%u", (unsigned)settings_load_port());
+        draw::text(mx + 40, my + 146, 48, draw::TEXT, port, true);
+        g_menu_item_rects[g_menu_item_count++] = {mx + 40, my + 230, 260, 68};
+        draw::accent_button(mx + 40, my + 230, 260, 68, "Change port", true);
+        draw::text(mx + 40, my + 330, 22, draw::MUTED, "Changing the port restarts the web server.", true);
+        draw::text(mx + 40, my + mh - 64, 22, draw::MUTED, "A/click change  B back", true);
+    } else if (g_menu == MENU_ABOUT) {
+        draw::text(mx + 40, my + 32, 40, draw::TEXT, "About C7S-Loader", true);
+        const char *lines[] = {
+            "Lorem ipsum dolor sit amet, consectetur adipiscing elit.",
+            "Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.",
+            "Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris.",
+            "Duis aute irure dolor in reprehenderit in voluptate velit esse.",
+            "Excepteur sint occaecat cupidatat non proident, sunt in culpa.",
+            "Qui officia deserunt mollit anim id est laborum.",
+        };
+        for (int i = 0; i < 6; i++)
+            draw::text(mx + 40, my + 120 + i * 42, 24, draw::MUTED, lines[i], true);
+        draw::text(mx + 40, my + mh - 64, 22, draw::MUTED, "B back", true);
+    }
+}
+
+void menu_input(Input &in) {
+    if (g_menu == MENU_ROOT) {
+        if (in.up) g_menu_sel = (g_menu_sel + 1) % 2;
+        if (in.down) g_menu_sel = (g_menu_sel + 1) % 2;
+        if (in.a) {
+            g_menu = g_menu_sel == 0 ? MENU_SETTINGS : MENU_ABOUT;
+            g_menu_sel = 0;
+        }
+        if (in.b) g_menu = MENU_NONE;
+    } else if (g_menu == MENU_SETTINGS) {
+        if (in.b) g_menu = MENU_ROOT;
+        if (in.a) {
+            unsigned short np;
+            if (ask_port(settings_load_port(), &np)) {
+                settings_save_port(np);
+                app_request_restart(np);
+                set_toast("Restarting web server on port %u...", (unsigned)np);
+            }
+        }
+    } else if (g_menu == MENU_ABOUT) {
+        if (in.b) g_menu = MENU_ROOT;
+    }
+    if (in.touch && g_menu_item_count > 0) {
+        for (int i = 0; i < g_menu_item_count; i++) {
+            if (g_menu_item_rects[i].hit(in.tx, in.ty)) {
+                if (g_menu == MENU_ROOT) {
+                    g_menu = i == 0 ? MENU_SETTINGS : MENU_ABOUT;
+                    g_menu_sel = 0;
+                } else if (g_menu == MENU_SETTINGS) {
+                    unsigned short np;
+                    if (ask_port(settings_load_port(), &np)) {
+                        settings_save_port(np);
+                        app_request_restart(np);
+                        set_toast("Restarting web server on port %u...", (unsigned)np);
+                    }
+                }
+                break;
+            }
+        }
     }
 }
 
@@ -1342,42 +1516,48 @@ void handle_input(const Input &in, const C7sAppSnapshot &s) {
             }
             break;
         case TAB_LIVE:
-            if (in.zl) g_liveview = LV_KBD;
-            if (in.zr) g_liveview = LV_PAD;
             if (in.touch_down) {
-                if (g_kbdtab_rect.hit(in.tx, in.ty)) g_liveview = LV_KBD;
-                else if (g_padtab_rect.hit(in.tx, in.ty)) g_liveview = LV_PAD;
-                else {
-                    for (int i = 0; i < g_live_key_count; i++)
-                        if (g_live_keys[i].r.hit(in.tx, in.ty)) { live_key_press(i); break; }
-                }
+                for (int i = 0; i < g_live_key_count; i++)
+                    if (g_live_keys[i].r.hit(in.tx, in.ty)) { live_key_press(i); break; }
             }
             if (in.touch_up) live_key_release();
             break;
-        case TAB_LDN:
-            if (g_ldn_log_full) {
-                if (in.up) g_ldn_log_scroll = g_ldn_log_scroll > 0 ? g_ldn_log_scroll - 1 : 0;
-                if (in.down) g_ldn_log_scroll++;
-                if (in.b || (in.touch && g_ldn_log_btn.hit(in.tx, in.ty))) g_ldn_log_full = false;
-            } else if (in.touch && g_ldn_log_btn.hit(in.tx, in.ty)) {
-                g_ldn_log_full = true;
-                g_ldn_log_scroll = 0;
-            } else if (in.touch && !ldn_route_active() && g_ldn_start_rect.hit(in.tx, in.ty)) {
-                ldn_route_start();
+        case TAB_LDN: {
+            // Lobby-centric controls. Up/Down picks a lobby; A registers it;
+            // Y (re)scans; X sends the loader; B stops. Touch mirrors all of it.
+            int count = ldn_route_scan_count();
+            if (count > 0 && g_ldn_selected >= count) g_ldn_selected = count - 1;
+            if (in.up && count > 0) g_ldn_selected = (g_ldn_selected + count - 1) % count;
+            if (in.down && count > 0) g_ldn_selected = (g_ldn_selected + 1) % count;
+            if (in.a && count > 0) ldn_route_join(g_ldn_selected);
+            if (in.y) { ldn_route_scan(); g_ldn_selected = 0; }
+            if (in.x) ldn_route_send_loader();
+            if (in.b) ldn_route_stop();
+            if (in.touch) {
+                if (!ldn_route_active() && g_ldn_scan_rect.hit(in.tx, in.ty)) {
+                    ldn_route_scan();
+                    g_ldn_selected = 0;
+                } else if (g_ldn_stop_rect.hit(in.tx, in.ty)) {
+                    ldn_route_stop();
+                } else if (ldn_route_connected() && g_ldn_send_rect.hit(in.tx, in.ty)) {
+                    ldn_route_send_loader();
+                } else {
+                    for (int i = 0; i < g_ldn_row_count; i++) {
+                        if (g_ldn_row_rects[i].hit(in.tx, in.ty)) {
+                            g_ldn_selected = i;
+                            ldn_route_join(i);
+                            break;
+                        }
+                    }
+                }
             }
             break;
+        }
         case TAB_CONNECT:
-            if (in.y || (in.touch && g_ktest_rect.hit(in.tx, in.ty))) {
-                app_request_ktest();
-                set_toast("Test keys in 5s - focus a text field");
-            }
-            if (in.x || (in.touch && g_port_rect.hit(in.tx, in.ty))) {
-                unsigned short np;
-                if (ask_port(s.port, &np)) {
-                    settings_save_port(np);
-                    app_request_restart(np);
-                    set_toast("Restarting web server on port %u...", (unsigned)np);
-                }
+            if (in.y || (in.touch && g_web_rect.hit(in.tx, in.ty))) {
+                if (httpd_running()) httpd_stop();
+                if (httpd_start(settings_load_port()) == 0) set_toast("Web server running on port %u", (unsigned)settings_load_port());
+                else set_toast("Web server failed to start");
             }
             break;
     }
@@ -1397,6 +1577,10 @@ extern "C" int c7s_ui_run(void) {
     refresh_entries(true);
 
     while (!g_quit) {
+        if (!appletMainLoop()) {
+            g_quit = true;
+            break;
+        }
         unsigned short new_port;
         if (app_take_restart(&new_port)) {
             httpd_stop();
@@ -1421,6 +1605,14 @@ extern "C" int c7s_ui_run(void) {
             httpd_start(httpd_port());
         }
 
+        static uint64_t last_ip_refresh = 0;
+        if (httpd_running() && ticks_ms() - last_ip_refresh > 3000) {
+            char ip[64];
+            local_ip(ip, sizeof(ip));
+            app_set_ip(ip);
+            last_ip_refresh = ticks_ms();
+        }
+
         C7sAppSnapshot s;
         app_snapshot(&s);
         const UsbCompositeStatus *u = usb_composite_status();
@@ -1430,24 +1622,39 @@ extern "C" int c7s_ui_run(void) {
         if (ticks_ms() - g_last_refresh > 2000 && g_overlay == OV_NONE) refresh_entries(false);
 
         Input in = poll_input();
+        if (g_menu == MENU_NONE) {
+            if (in.minus_held) {
+                if (g_minus_start == 0) g_minus_start = ticks_ms();
+                else if (ticks_ms() - g_minus_start > 650) {
+                    g_minus_start = 0;
+                    open_menu();
+                }
+            } else {
+                g_minus_start = 0;
+            }
+        }
         if (carry_enabled()) {
             in.up = in.down = in.left = in.right = false;
             in.a = in.b = in.x = in.y = false;
             in.l = in.r = in.zl = in.zr = false;
             in.minus = false;
         }
-        if (in.plus_held) {
-            if (g_plus_start == 0) {
-                g_plus_start = ticks_ms();
-            } else if (ticks_ms() - g_plus_start >= 2000) {
-                g_plus_start = 0;
-                if (s.running) app_request_cancel();
-                g_quit = true;
-            }
+        if (g_menu != MENU_NONE) {
+            menu_input(in);
         } else {
-            g_plus_start = 0;
+            if (in.plus_held) {
+                if (g_plus_start == 0) {
+                    g_plus_start = ticks_ms();
+                } else if (ticks_ms() - g_plus_start >= 2000) {
+                    g_plus_start = 0;
+                    if (s.running) app_request_cancel();
+                    g_quit = true;
+                }
+            } else {
+                g_plus_start = 0;
+            }
+            handle_input(in, s);
         }
-        handle_input(in, s);
 
         frame_begin();
         draw::rect(0, 0, W, H, draw::BG, 0);
@@ -1460,6 +1667,7 @@ extern "C" int c7s_ui_run(void) {
         }
         if (g_overlay == OV_RUNNING) draw_running(s);
         else if (g_overlay == OV_RESULT) draw_result(s);
+        if (g_menu != MENU_NONE) draw_menu();
         draw_toast();
         frame_end();
         svcSleepThread(16000000ull);
@@ -1472,9 +1680,18 @@ extern "C" int c7s_ui_run(void) {
     // the web server to stop, then keep the applet pumped and the frame
     // repainting while it actually comes down -- bounded, then exit anyway.
     app_exit_trace("ui: closing");
+    // Ask every network thread to come down (all non-blocking: they set a
+    // stop flag and shut down their sockets so a parked accept()/recv()
+    // returns). ldn_route_shutdown() joins the LDN worker, which honours
+    // its stop flag within ~100ms, so it is quick when idle.
+    ldn_route_shutdown();
     httpd_request_stop();
+    temp_ftp_stop();
+    // Keep the applet pumped and the frame repainting while they actually
+    // go down -- by the clock, bounded, then exit anyway. socketExit() in
+    // userAppExit must not run while any of these still hold a socket.
     for (uint64_t until = ticks_ms() + 4000; ticks_ms() < until; ) {
-        if (!httpd_running()) break;
+        if (!httpd_running() && !temp_ftp_running()) break;
         if (!appletMainLoop()) break;
         frame_begin();
         draw::rect(0, 0, W, H, draw::BG, 0);
@@ -1483,7 +1700,7 @@ extern "C" int c7s_ui_run(void) {
         frame_end();
         svcSleepThread(40000000ull);
     }
-    app_exit_trace("ui: httpd running=%d after wait", httpd_running());
+    app_exit_trace("ui: after wait httpd=%d ftp=%d", httpd_running(), temp_ftp_running());
     httpd_stop();
     app_exit_trace("ui: httpd stopped");
     // Cancels any running payload (which now releases held keys), drains the

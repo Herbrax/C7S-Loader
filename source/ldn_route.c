@@ -14,7 +14,11 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include "app.h"
+#include "httpd.h"
 #include "ldn_data.h"
+#include "settings.h"
+#include "switch_init.h"
 
 #define LDN_PORT 62056
 #define MAXPKT 1100
@@ -30,6 +34,19 @@ static const u8 CIV7_PASS[CIV7_PASS_LEN] = {
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static bool g_active;
 static bool g_ldn_inited;
+static bool g_station_open;
+static bool g_connected;
+static volatile bool g_stop;
+static volatile bool g_send_requested;
+static volatile int g_lobby_sock = -1;
+static LdnNetworkInfo g_nets[24];
+static LdnLobbyInfo g_infos[24];
+static int g_net_count;
+static pthread_t g_lobby_thread;
+static bool g_lobby_thread_valid;
+static pthread_t g_scan_thread;
+static bool g_scan_thread_valid;
+static volatile bool g_scanning;
 static volatile bool g_wifi_off = false;
 static volatile bool g_status_run = false;
 static char g_status[256] = "idle";
@@ -145,6 +162,9 @@ typedef struct {
     bool joined;
     int received;
     int chat_sent;
+    u8 welcome[512];
+    size_t welcome_len;
+    bool welcome_seen;
 } Lobby;
 
 static u64 mono_ms(void) {
@@ -453,7 +473,7 @@ static bool lobby_run(Lobby *l, int sock, u32 host_ip) {
     int attempts = 0;
     u8 pkt[MAXPKT];
 
-    while (mono_ms() - start < 45000) {
+    while (mono_ms() - start < 300000 && !g_stop) {
         u64 now = mono_ms();
         if (!l->joined && attempts < 3 && now >= next_attempt) {
             attempts++;
@@ -487,14 +507,22 @@ static bool lobby_run(Lobby *l, int sock, u32 host_ip) {
                         set_status("join refused/kicked by host");
                         return false;
                     }
-                    if (!l->joined && is_welcome(bodies[i], (size_t)blens[i])) {
-                        schedule_lobby(l, bodies[i], (size_t)blens[i]);
+                    if (!l->welcome_seen && is_welcome(bodies[i], (size_t)blens[i])) {
+                        size_t wl = (size_t)blens[i];
+                        if (wl > sizeof(l->welcome)) wl = sizeof(l->welcome);
+                        memcpy(l->welcome, bodies[i], wl);
+                        l->welcome_len = wl;
+                        l->welcome_seen = true;
+                        set_status("LDN: registered; press Send RemoteJSLoader");
                     }
                     l->received++;
                 }
             }
         }
 
+        if (l->welcome_seen && g_send_requested && !l->joined) {
+            schedule_lobby(l, l->welcome, l->welcome_len);
+        }
         if (l->joined) {
             while (l->follow_n > 0 && l->follow[0].at <= mono_ms()) {
                 Follow f = l->follow[0];
@@ -534,6 +562,20 @@ static bool lobby_run(Lobby *l, int sock, u32 host_ip) {
     return false;
 }
 
+static const char *network_problem(const LdnNetworkInfo *network) {
+    if (network->node_count == 0 || network->node_count > 8)
+        return "no valid host";
+    if (network->node_count_max <= 0 || network->node_count_max > 8)
+        return "invalid capacity";
+    if (network->node_count >= (u8)network->node_count_max)
+        return "lobby full";
+    if (network->station_accept_policy == LdnAcceptPolicy_AlwaysReject)
+        return "rejects new players";
+    if (network->nodes[0].local_communication_version < 0)
+        return "invalid game version";
+    return NULL;
+}
+
 static bool ldn_scan_one(LdnNetworkInfo *out) {
     LdnNetworkInfo nets[24];
     LdnScanFilter filter;
@@ -543,10 +585,12 @@ static bool ldn_scan_one(LdnNetworkInfo *out) {
     logf_("scan ch=0 rc=%08x total=%d", (unsigned)rc, (int)total);
     if (R_FAILED(rc)) return false;
     for (s32 i = 0; i < total && i < 24; i++) {
-        logf_("  net ch=%d ssid=%.32s nodes=%d link=%d",
+        const char *problem = network_problem(&nets[i]);
+        logf_("  net ch=%d ssid=%.32s nodes=%d/%d link=%d problem=%s",
               (int)nets[i].common.channel, nets[i].common.ssid.str,
-              (int)nets[i].node_count, (int)nets[i].common.link_level);
-        if (nets[i].node_count > 0) {
+              (int)nets[i].node_count, (int)nets[i].node_count_max,
+              (int)nets[i].common.link_level, problem ? problem : "ok");
+        if (nets[i].node_count > 0 && problem == NULL) {
             *out = nets[i];
             return true;
         }
@@ -554,17 +598,21 @@ static bool ldn_scan_one(LdnNetworkInfo *out) {
     return false;
 }
 
-static void *ldn_worker(void *arg) {
-    (void)arg;
-    set_status("LDN: scanning for a Civ 7 wireless lobby");
-    logf_("LDN route started");
-    if (!g_ldn_inited) {
-        set_status("LDN: launch in app mode (hold R over a game)");
-        pthread_mutex_lock(&g_lock);
-        g_active = false;
-        pthread_mutex_unlock(&g_lock);
-        return NULL;
+typedef struct {
+    LdnNetworkInfo info;
+    u32 local_ip;
+} LdnLobbyArgs;
+
+static void *ldn_lobby_worker(void *arg);
+
+static int ldn_scan_all(void) {
+    if (g_station_open) {
+        ldnCloseStation();
+        g_station_open = false;
     }
+    g_stop = false;
+    g_send_requested = false;
+    g_connected = false;
 
     Result orc = ldnOpenStation();
     LdnState ost = 0;
@@ -572,83 +620,171 @@ static void *ldn_worker(void *arg) {
     logf_("LDN: open station rc=%08x state=%d", (unsigned)orc, (int)ost);
     if (R_FAILED(orc)) {
         set_status("LDN: open station failed (%08x)", (unsigned)orc);
-        pthread_mutex_lock(&g_lock);
-        g_active = false;
-        pthread_mutex_unlock(&g_lock);
-        return NULL;
+        return 0;
+    }
+    g_station_open = true;
+
+    LdnScanFilter filter;
+    memset(&filter, 0, sizeof(filter));
+    s32 total = 0;
+    Result rc = ldnScan(0, &filter, g_nets, 24, &total);
+    logf_("scan ch=0 rc=%08x total=%d", (unsigned)rc, (int)total);
+    if (R_FAILED(rc)) total = 0;
+    if (total > 24) total = 24;
+
+    g_net_count = 0;
+    for (s32 i = 0; i < total; i++) {
+        const char *problem = network_problem(&g_nets[i]);
+        LdnLobbyInfo *out = &g_infos[g_net_count];
+        memset(out, 0, sizeof(*out));
+        snprintf(out->ssid, sizeof(out->ssid), "%.32s", g_nets[i].common.ssid.str);
+        out->node_count = g_nets[i].node_count;
+        out->node_count_max = g_nets[i].node_count_max;
+        out->channel = g_nets[i].common.channel;
+        out->link_level = g_nets[i].common.link_level;
+        out->version = g_nets[i].nodes[0].local_communication_version;
+        out->host_ip = ip_u32(&g_nets[i].nodes[0].ip_addr);
+        out->joinable = (problem == NULL);
+        if (problem) snprintf(out->problem, sizeof(out->problem), "%s", problem);
+        logf_("  net ch=%d ssid=%.32s nodes=%d/%d link=%d problem=%s",
+              (int)out->channel, out->ssid, (int)out->node_count,
+              (int)out->node_count_max, (int)out->link_level,
+              problem ? problem : "ok");
+        g_net_count++;
     }
 
-    LdnNetworkInfo info;
-    if (!ldn_scan_one(&info)) {
-        set_status("LDN: no network found. Open the Civ 7 wireless lobby.");
-        ldnCloseStation();
-        pthread_mutex_lock(&g_lock);
-        g_active = false;
-        pthread_mutex_unlock(&g_lock);
-        return NULL;
+    if (g_net_count == 0) set_status("LDN: no network found. Open the Civ 7 wireless lobby.");
+    else set_status("LDN: found %d lobby(s)", g_net_count);
+    return g_net_count;
+}
+
+int ldn_route_scan(void) {
+    if (g_active || g_scanning) return g_net_count;
+    httpd_stop();
+    if (!g_ldn_inited) {
+        Result irc = ldn_route_init();
+        if (R_FAILED(irc)) return 0;
+    }
+    g_net_count = 0;
+    g_scanning = true;
+    int n = ldn_scan_all();
+    g_scanning = false;
+    return n;
+}
+
+int ldn_route_scan_count(void) { return g_net_count; }
+
+const LdnLobbyInfo *ldn_route_scan_item(int index) {
+    if (index < 0 || index >= g_net_count) return NULL;
+    return &g_infos[index];
+}
+
+int ldn_route_join(int index) {
+    if (g_active || g_scanning) return -2;
+    if (index < 0 || index >= g_net_count) return -1;
+    if (!g_infos[index].joinable) {
+        set_status("LDN: %s", g_infos[index].problem);
+        return -1;
+    }
+    if (!g_station_open) {
+        Result orc = ldnOpenStation();
+        logf_("LDN: reopen station rc=%08x", (unsigned)orc);
+        if (R_FAILED(orc)) return (int)orc;
+        g_station_open = true;
     }
 
-    u32 host_ip = ip_u32(&info.nodes[0].ip_addr);
-    set_status("LDN: connecting to %u.%u.%u.%u",
-               (host_ip >> 24) & 255, (host_ip >> 16) & 255,
-               (host_ip >> 8) & 255, host_ip & 255);
-
+    LdnNetworkInfo *net = &g_nets[index];
+    logf_("LDN: target ssid=%.32s nodes=%d/%d accept=%d sec=%d version=%d",
+          net->common.ssid.str, (int)net->node_count, (int)net->node_count_max,
+          (int)net->station_accept_policy, (int)net->security_mode,
+          (int)net->nodes[0].local_communication_version);
     LdnSecurityConfig sec;
     memset(&sec, 0, sizeof(sec));
     sec.passphrase_size = CIV7_PASS_LEN;
     memcpy(sec.passphrase, CIV7_PASS, CIV7_PASS_LEN);
-
     LdnUserConfig user;
     memset(&user, 0, sizeof(user));
     snprintf(user.user_name, sizeof(user.user_name), "CivSwitch-LDN-NX");
 
-    Result rc = ldnConnect(&sec, &user, info.nodes[0].local_communication_version, 0, &info);
+    set_status("LDN: registering in %s", g_infos[index].ssid);
+    Result rc = ldnConnect(&sec, &user, net->nodes[0].local_communication_version, 0, net);
+    logf_("LDN: connect rc=%08x", (unsigned)rc);
     if (R_FAILED(rc)) {
         set_status("LDN: connect failed (%08x)", (unsigned)rc);
-        ldnCloseStation();
-        pthread_mutex_lock(&g_lock);
-        g_active = false;
-        pthread_mutex_unlock(&g_lock);
-        return NULL;
+        return (int)rc;
     }
 
     LdnIpv4Address local_addr;
     LdnSubnetMask mask;
-    if (R_FAILED(ldnGetIpv4Address(&local_addr, &mask))) {
-        set_status("LDN: no local IP");
+    Result irc = ldnGetIpv4Address(&local_addr, &mask);
+    logf_("LDN: local IP rc=%08x", (unsigned)irc);
+    if (R_FAILED(irc)) {
+        set_status("LDN: no local IP (%08x)", (unsigned)irc);
         ldnDisconnect();
         ldnCloseStation();
-        pthread_mutex_lock(&g_lock);
-        g_active = false;
-        pthread_mutex_unlock(&g_lock);
-        return NULL;
+        g_station_open = false;
+        return (int)irc;
     }
-    u32 local_ip = ip_u32(&local_addr);
+
+    g_connected = true;
+    g_stop = false;
+    g_send_requested = false;
+
+    LdnLobbyArgs *args = calloc(1, sizeof(*args));
+    if (!args) {
+        set_status("LDN: out of memory");
+        ldnDisconnect();
+        ldnCloseStation();
+        g_station_open = false;
+        g_connected = false;
+        return -3;
+    }
+    args->info = *net;
+    args->local_ip = ip_u32(&local_addr);
+
+    g_active = true;
+    pthread_t th;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 1024 * 1024);
+    int trc = pthread_create(&th, &attr, ldn_lobby_worker, args);
+    pthread_attr_destroy(&attr);
+    if (trc != 0) {
+        ldnDisconnect();
+        ldnCloseStation();
+        g_station_open = false;
+        g_connected = false;
+        g_active = false;
+        free(args);
+        set_status("LDN: could not start worker");
+        return -4;
+    }
+    g_lobby_thread = th;
+    g_lobby_thread_valid = true;
+    set_status("LDN: connected; waiting for host");
+    return 0;
+}
+
+static void *ldn_lobby_worker(void *arg) {
+    LdnLobbyArgs *a = arg;
+    u32 host_ip = ip_u32(&a->info.nodes[0].ip_addr);
 
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) {
         set_status("LDN: UDP socket failed (%d)", errno);
-        ldnDisconnect();
-        ldnCloseStation();
-        pthread_mutex_lock(&g_lock);
-        g_active = false;
-        pthread_mutex_unlock(&g_lock);
-        return NULL;
+        goto cleanup;
     }
+    g_lobby_sock = sock;
     struct sockaddr_in bind_addr;
     memset(&bind_addr, 0, sizeof(bind_addr));
     bind_addr.sin_family = AF_INET;
     bind_addr.sin_port = htons(LDN_PORT);
-    bind_addr.sin_addr.s_addr = local_ip;
+    bind_addr.sin_addr.s_addr = a->local_ip;
     if (bind(sock, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) < 0) {
         set_status("LDN: UDP bind failed (%d)", errno);
         close(sock);
-        ldnDisconnect();
-        ldnCloseStation();
-        pthread_mutex_lock(&g_lock);
-        g_active = false;
-        pthread_mutex_unlock(&g_lock);
-        return NULL;
+        g_lobby_sock = -1;
+        goto cleanup;
     }
 
     Lobby *lobby = calloc(1, sizeof(Lobby));
@@ -656,22 +792,32 @@ static void *ldn_worker(void *arg) {
     if (!lobby) {
         set_status("LDN: out of memory");
     } else {
-        lobby->local_ip = local_ip;
+        lobby->local_ip = a->local_ip;
         ok = lobby_run(lobby, sock, host_ip);
         free(lobby);
     }
-
-    close(sock);
-    ldnDisconnect();
-    ldnCloseStation();
+    if (g_lobby_sock == sock) {
+        close(sock);
+        g_lobby_sock = -1;
+    }
     set_status(ok ? "LDN: finished" : "LDN: stopped");
     logf_("LDN route finished: %s", ok ? "ok" : "failed");
-    pthread_mutex_lock(&g_lock);
+
+cleanup:
+    ldnDisconnect();
+    ldnCloseStation();
+    g_connected = false;
+    g_station_open = false;
+    g_send_requested = false;
+    g_stop = false;
     g_active = false;
-    pthread_mutex_unlock(&g_lock);
+    char ip[64];
+    local_ip(ip, sizeof(ip));
+    app_set_ip(ip);
+    if (!httpd_running()) httpd_start(settings_load_port());
+    free(a);
     return NULL;
 }
-
 
 static void *status_thread(void *arg) {
     (void)arg;
@@ -698,10 +844,10 @@ static void *status_thread(void *arg) {
 }
 
 Result ldn_route_init(void) {
-    struct in_addr host;
-    host.s_addr = (in_addr_t)gethostid();
-    if (!host.s_addr || host.s_addr == htonl(INADDR_LOOPBACK)) {
-        logf_("LDN: no network profile/IP; skipping ldnInitialize");
+    char net_ip[64];
+    local_ip(net_ip, sizeof(net_ip));
+    if (strcmp(net_ip, "unknown") == 0) {
+        logf_("LDN: no network IP; skipping ldnInitialize");
         set_status("LDN: connect same Wi-Fi/LAN as Switch 2, then relaunch");
         return MAKERESULT(Module_Libnx, LibnxError_NotInitialized);
     }
@@ -728,37 +874,57 @@ Result ldn_route_init(void) {
 }
 
 void ldn_route_start(void) {
-    pthread_mutex_lock(&g_lock);
-    if (g_active) {
-        pthread_mutex_unlock(&g_lock);
-        return;
-    }
-    if (!g_ldn_inited) {
-        pthread_mutex_unlock(&g_lock);
-        set_status("LDN: connect same Wi-Fi/LAN as Switch 2, then relaunch");
-        return;
-    }
-    g_active = true;
-    g_log[0] = '\0';
-    snprintf(g_status, sizeof(g_status), "starting");
-    pthread_mutex_unlock(&g_lock);
-    g_status_run = true;
+    if (ldn_route_scan() > 0) ldn_route_join(0);
+}
 
-    pthread_t th;
-    pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    pthread_attr_setstacksize(&attr, 1024 * 1024);
-    int rc = pthread_create(&th, &attr, ldn_worker, NULL);
-    pthread_attr_destroy(&attr);
-    if (rc != 0) {
-        pthread_mutex_lock(&g_lock);
-        g_active = false;
-        pthread_mutex_unlock(&g_lock);
-        set_status("LDN: could not start worker");
-        g_status_run = false;
+void ldn_route_send_loader(void) {
+    if (!g_active) {
+        set_status("LDN: register in a lobby first");
         return;
     }
-    pthread_detach(th);
+    g_send_requested = true;
+    set_status("LDN: sending RemoteJSLoader...");
+}
+
+static void close_lobby_socket(void) {
+    int s = g_lobby_sock;
+    if (s >= 0) {
+        g_lobby_sock = -1;
+        shutdown(s, SHUT_RDWR);
+        close(s);
+    }
+}
+
+void ldn_route_stop(void) {
+    g_stop = true;
+    g_send_requested = false;
+    logf_("LDN: stop requested");
+    close_lobby_socket();
+    for (int i = 0; i < 150 && g_active; i++) svcSleepThread(20000000ull);
+    if (g_lobby_thread_valid) {
+        pthread_join(g_lobby_thread, NULL);
+        g_lobby_thread_valid = false;
+    }
+    if (g_connected) {
+        ldnDisconnect();
+        g_connected = false;
+    }
+    if (g_station_open) {
+        ldnCloseStation();
+        g_station_open = false;
+    }
+    if (g_ldn_inited) {
+        ldnExit();
+        g_ldn_inited = false;
+    }
+    g_active = false;
+    g_scanning = false;
+    g_net_count = 0;
+    char ip[64];
+    local_ip(ip, sizeof(ip));
+    app_set_ip(ip);
+    if (!httpd_running()) httpd_start(settings_load_port());
+    set_status("LDN: stopped; Wi-Fi reconnecting");
 }
 
 bool ldn_route_active(void) {
@@ -767,6 +933,7 @@ bool ldn_route_active(void) {
     pthread_mutex_unlock(&g_lock);
     return a;
 }
+bool ldn_route_connected(void) { return g_connected; }
 
 const char *ldn_route_status(void) {
     return g_status;
@@ -777,9 +944,27 @@ const char *ldn_route_log(void) {
 }
 
 void ldn_route_shutdown(void) {
-    if (g_ldn_inited) {
+    g_stop = true;
+    g_send_requested = false;
+    close_lobby_socket();
+    for (int i = 0; i < 150 && g_active; i++) svcSleepThread(20000000ull);
+    if (g_lobby_thread_valid) {
+        pthread_join(g_lobby_thread, NULL);
+        g_lobby_thread_valid = false;
+    }
+    if (g_connected) {
+        ldnDisconnect();
+        g_connected = false;
+    }
+    if (g_station_open) {
         ldnCloseStation();
+        g_station_open = false;
+    }
+    if (g_ldn_inited) {
         ldnExit();
         g_ldn_inited = false;
     }
+    g_active = false;
+    g_scanning = false;
+    g_net_count = 0;
 }

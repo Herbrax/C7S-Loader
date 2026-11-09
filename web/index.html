@@ -145,15 +145,36 @@
 
 <!-- ============ LDN ============ -->
 <main class="wrap hidden" id="tab-ldn">
-  <div class="card">
-    <h2>LDN injection</h2>
-    <div class="muted" style="font-size:14px;margin-bottom:8px">On the Switch 2: <b>MULTIPLAYER → WIRELESS → CREATE GAME → HOST LOBBY (+)</b>. Keep the lobby open.</div>
-    <div class="muted" style="font-size:13px;margin-bottom:16px">The Switch 1 joins over local wireless using the native ldn service. No prod.keys.</div>
-    <div style="display:flex;gap:14px;align-items:center;margin-bottom:16px">
-      <button class="btn primary" id="ldnStart">Start LDN</button>
-      <span class="muted" id="ldnStatus">idle</span>
+  <div class="ldnbanner" id="ldnBanner">
+    <span class="ldnspin" id="ldnSpin"></span>
+    <span class="dot" id="ldnDot"></span>
+    <div style="flex:1;min-width:0">
+      <div class="ldnphase" id="ldnPhase">IDLE</div>
+      <div class="muted" id="ldnStatus" style="font-size:13.5px">Idle</div>
     </div>
-    <pre id="ldnLog" class="console"></pre>
+    <button class="btn danger hidden" id="ldnStop">Stop LDN</button>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h2>Lobbies <button class="btn ghost" id="ldnScan" style="margin-left:auto;padding:6px 14px">Scan</button></h2>
+      <div class="files" id="ldnList">
+        <div class="empty"><div class="big">No lobbies yet</div><div>Open the Civ 7 wireless lobby on the Switch 2, then Scan.</div></div>
+      </div>
+      <button class="btn primary lg block" id="ldnSend" disabled style="margin-top:16px">Send RemoteJSLoader</button>
+      <div class="muted" id="ldnWeb" style="font-size:12.5px;margin-top:10px;display:flex;align-items:center;gap:8px"><span class="dot ok"></span>Web server running</div>
+    </div>
+
+    <div class="card col">
+      <h2>How it works</h2>
+      <ol class="steps">
+        <li><b>On the Switch 2:</b> MULTIPLAYER → WIRELESS → CREATE GAME → HOST LOBBY <b>(+)</b>, and keep it open.</li>
+        <li><b>Scan</b> from the Switch 1 — it finds Civ 7 lobbies on the local wireless.</li>
+        <li><b>Register</b> into a lobby by tapping it in the list.</li>
+        <li><b>Send RemoteJSLoader</b> to push the payload into the lobby chat.</li>
+      </ol>
+      <p class="explain">The Switch 1 joins over local wireless using the native <span class="mono">ldn</span> service — no cable, no <span class="mono">prod.keys</span>. The web server pauses while LDN owns the Wi-Fi and comes back when you Stop.</p>
+    </div>
   </div>
 </main>
 

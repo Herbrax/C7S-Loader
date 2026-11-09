@@ -130,6 +130,24 @@ button:disabled { opacity: .45; cursor: default; filter: none; }
 .pb { height: 46px; min-width: 52px; padding: 0 12px; border-radius: 10px; background: var(--panel2); box-shadow: inset 0 0 0 1px var(--line2), 0 2px 0 #0a101c; display: inline-flex; align-items: center; justify-content: center; font-weight: 600; cursor: pointer; color: var(--text); user-select: none; }
 .pb.active { background: var(--accent); color: #fff; box-shadow: 0 0 0 3px rgba(47,140,255,.25); }
 
+/* ldn */
+.ldnbanner { display: flex; align-items: center; gap: 14px; padding: 16px 20px; border-radius: 14px; background: var(--panel); box-shadow: inset 0 0 0 1px var(--line); margin-bottom: 18px; }
+.ldnbanner.active { background: linear-gradient(90deg, #163163, #122240); box-shadow: inset 0 0 0 1px #295196; }
+.ldnbanner.done { background: linear-gradient(90deg, #12402c, #0f2a22); box-shadow: inset 0 0 0 1px #1f6b4a; }
+.ldnphase { font-family: var(--mono); font-size: 11px; letter-spacing: 1.4px; text-transform: uppercase; color: var(--muted); }
+.ldnbanner.active .ldnphase { color: #7fb0ff; } .ldnbanner.done .ldnphase { color: var(--ok); }
+.ldnspin { width: 18px; height: 18px; border-radius: 50%; border: 2.5px solid rgba(255,255,255,.18); border-top-color: var(--accent); animation: spin .8s linear infinite; flex: none; display: none; }
+.ldnbanner.busy .ldnspin { display: block; } .ldnbanner.busy .dot { display: none; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.steps { list-style: none; counter-reset: s; display: flex; flex-direction: column; gap: 12px; margin: 2px 0 4px; }
+.steps li { counter-increment: s; position: relative; padding-left: 38px; font-size: 13.5px; color: var(--muted); line-height: 1.5; }
+.steps li b { color: var(--text); }
+.steps li::before { content: counter(s); position: absolute; left: 0; top: -1px; width: 26px; height: 26px; border-radius: 50%; background: var(--panel3); box-shadow: inset 0 0 0 1px var(--line2); color: var(--text); font-weight: 700; font-size: 13px; display: flex; align-items: center; justify-content: center; }
+.lobby .bars { display: inline-flex; align-items: flex-end; gap: 2px; height: 16px; }
+.lobby .bars i { width: 4px; border-radius: 1px; background: var(--line2); }
+.lobby.joinable .bars i.on { background: var(--ok); }
+.lobby .state { font-size: 12px; font-weight: 700; letter-spacing: .4px; }
+
 /* status */
 .kv { display: flex; justify-content: space-between; padding: 11px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
 .kv:last-child { border: 0; }

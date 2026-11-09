@@ -606,16 +606,46 @@ static enum MHD_Result api_download(struct MHD_Connection *conn) {
 }
 
 static enum MHD_Result api_ldn(struct MHD_Connection *conn) {
+    // Actions mirror the console flow: scan -> join -> send -> stop.
+    const char *action = MHD_lookup_connection_value(conn, MHD_GET_ARGUMENT_KIND, "action");
     const char *start = MHD_lookup_connection_value(conn, MHD_GET_ARGUMENT_KIND, "start");
-    if (start && (!strcmp(start, "1") || !strcmp(start, "true"))) ldn_route_start();
+    if (action) {
+        if (!strcmp(action, "scan")) {
+            ldn_route_scan();
+        } else if (!strcmp(action, "join")) {
+            const char *idx = MHD_lookup_connection_value(conn, MHD_GET_ARGUMENT_KIND, "index");
+            ldn_route_join(idx ? atoi(idx) : 0);
+        } else if (!strcmp(action, "send")) {
+            ldn_route_send_loader();
+        } else if (!strcmp(action, "stop")) {
+            ldn_route_stop();
+        }
+    } else if (start && (!strcmp(start, "1") || !strcmp(start, "true"))) {
+        ldn_route_scan();
+    }
+
     sb_t b = {0};
     sb_add(&b, "{\"ok\":true,\"active\":");
     sb_add(&b, ldn_route_active() ? "true" : "false");
+    sb_add(&b, ",\"connected\":");
+    sb_add(&b, ldn_route_connected() ? "true" : "false");
     sb_add(&b, ",\"status\":");
     sb_json(&b, ldn_route_status());
-    sb_add(&b, ",\"log\":");
-    sb_json(&b, ldn_route_log());
-    sb_add(&b, "}");
+    sb_add(&b, ",\"lobbies\":[");
+    int n = ldn_route_scan_count();
+    for (int i = 0; i < n; i++) {
+        const LdnLobbyInfo *li = ldn_route_scan_item(i);
+        if (!li) break;
+        if (i) sb_add(&b, ",");
+        sb_add(&b, "{\"ssid\":");
+        sb_json(&b, li->ssid[0] ? li->ssid : "(hidden)");
+        sb_addf(&b, ",\"players\":%d,\"max\":%d,\"channel\":%d,\"link\":%d,\"joinable\":%s,\"problem\":",
+                (int)li->node_count, (int)li->node_count_max, (int)li->channel,
+                (int)li->link_level, li->joinable ? "true" : "false");
+        sb_json(&b, li->problem);
+        sb_add(&b, "}");
+    }
+    sb_add(&b, "]}");
     return reply_json(conn, 200, &b);
 }
 
