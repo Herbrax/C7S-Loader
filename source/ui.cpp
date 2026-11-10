@@ -18,6 +18,7 @@ extern "C" {
 #include "httpd.h"
 #include "ldn_route.h"
 #include "library.h"
+#include "remote_js.h"
 #include "live.h"
 #include "record.h"
 #include "settings.h"
@@ -314,10 +315,11 @@ constexpr float CONTENT_H = H - BOTTOM - CONTENT_Y - 24.0f;
 constexpr float COL_GAP = 24.0f;
 constexpr float SEND_LIST_W = 1120.0f;
 
-enum Tab { TAB_SEND = 0, TAB_LIVE = 1, TAB_CONNECT = 2, TAB_LDN = 3 };
+enum Tab { TAB_SEND = 0, TAB_LIVE = 1, TAB_CONNECT = 2, TAB_LDN = 3, TAB_JS = 4 };
+static const int TAB_COUNT = 5;
 enum Overlay { OV_NONE, OV_RUNNING, OV_RESULT };
 enum LiveView { LV_KBD, LV_PAD };
-enum Mode { MODE_TEXT, MODE_SCRIPT, MODE_CHAT, MODE_UNKNOWN };
+enum Mode { MODE_TEXT, MODE_SCRIPT, MODE_CHAT, MODE_JS, MODE_UNKNOWN };
 
 NWindow *g_win = nullptr;
 Framebuffer g_fb;
@@ -347,13 +349,31 @@ char g_preview[8][160];
 int g_preview_count = 0;
 char g_preview_name[160] = {0};
 
-Rect g_tab_rects[4];
+Rect g_tab_rects[5];
 Rect g_ldn_scan_rect;
-Rect g_ldn_stop_rect;
 Rect g_ldn_send_rect;
+Rect g_ldn_test_rect;
+Rect g_ldn_js_rect;    // stage 3: jump to the JS Payload tab
 Rect g_ldn_row_rects[24];
+int g_ldn_row_ent[24];   // network row -> scan item index
 int g_ldn_row_count = 0;
 int g_ldn_selected = 0;
+Rect g_ldn_pay_rects[64];
+int g_ldn_pay_ent[64];   // payload row -> g_entries index
+int g_ldn_pay_count = 0;
+char g_ldn_pay_name[128] = {0};  // selected payload file name
+
+// ---- JS Payload tab ----
+Rect g_js_scan_rect;
+Rect g_js_reset_rect;
+Rect g_js_send_rect;
+Rect g_js_row_rects[64];
+char g_js_names[64][128];
+int g_js_count = 0;
+int g_js_selected = 0;
+int g_js_first = 0;
+uint64_t g_js_refresh_at = 0;    // throttle directory listing
+
 Rect g_web_rect;
 Rect g_menu_item_rects[8];
 int g_menu_item_count = 0;
@@ -505,18 +525,18 @@ Input poll_input() {
     return in;
 }
 
+// Primary mode shown as the list tag. A file can carry two types; for the
+// single tag we surface Script > Civ7LDN > Text.
+Mode mode_from_types(int types) {
+    if (types & C7S_TYPE_JS) return MODE_JS;
+    if (types & C7S_TYPE_SCRIPT) return MODE_SCRIPT;
+    if (types & C7S_TYPE_CIV7LDN) return MODE_CHAT;
+    if (types & C7S_TYPE_TEXT) return MODE_TEXT;
+    return MODE_UNKNOWN;
+}
 Mode mode_of(const char *path, const C7sEntry &e) {
-    C7sPayload p;
-    Mode m = MODE_UNKNOWN;
-    if (c7s_parse_file(path, &p)) {
-        if (p.plain) m = MODE_TEXT;
-        else if (p.script) m = MODE_SCRIPT;
-        else m = MODE_CHAT;
-        c7s_free(&p);
-    } else {
-        m = e.header ? MODE_TEXT : MODE_UNKNOWN;
-    }
-    return m;
+    (void)path;
+    return mode_from_types(e.types);
 }
 
 void refresh_preview() {
@@ -583,14 +603,16 @@ void refresh_entries(bool prefer_selected) {
 
 // ---------- shared widgets ----------
 void mode_tag(float x, float y, Mode m) {
-    const char *label = m == MODE_TEXT ? "TEXT" : m == MODE_SCRIPT ? "SCRIPT" : m == MODE_CHAT ? "CIV 7 CHAT" : "UNREADABLE";
+    const char *label = m == MODE_TEXT ? "TEXT" : m == MODE_SCRIPT ? "SCRIPT" : m == MODE_CHAT ? "CIV 7 CHAT" : m == MODE_JS ? "JS PAYLOAD" : "UNREADABLE";
     ImU32 fg = m == MODE_TEXT ? IM_COL32(143, 193, 255, 255)
                : m == MODE_SCRIPT ? IM_COL32(126, 230, 184, 255)
                : m == MODE_CHAT ? IM_COL32(236, 210, 145, 255)
+               : m == MODE_JS ? IM_COL32(196, 166, 255, 255)
                                 : IM_COL32(255, 176, 176, 255);
     ImU32 bg = m == MODE_TEXT ? IM_COL32(47, 140, 255, 40)
                : m == MODE_SCRIPT ? IM_COL32(60, 207, 145, 38)
                : m == MODE_CHAT ? IM_COL32(217, 182, 94, 40)
+               : m == MODE_JS ? IM_COL32(140, 90, 255, 38)
                                 : IM_COL32(255, 107, 107, 38);
     ImVec2 ts = draw::text_size(20, label, true);
     float w = ts.x + 24, h = 30;
@@ -598,14 +620,54 @@ void mode_tag(float x, float y, Mode m) {
     draw::text(x + 12, y + (h - ts.y) / 2, 20, fg, label, true);
 }
 float mode_tag_w(Mode m) {
-    const char *label = m == MODE_TEXT ? "TEXT" : m == MODE_SCRIPT ? "SCRIPT" : m == MODE_CHAT ? "CIV 7 CHAT" : "UNREADABLE";
+    const char *label = m == MODE_TEXT ? "TEXT" : m == MODE_SCRIPT ? "SCRIPT" : m == MODE_CHAT ? "CIV 7 CHAT" : m == MODE_JS ? "JS PAYLOAD" : "UNREADABLE";
     return draw::text_size(20, label, true).x + 24;
 }
 ImU32 mode_icon_col(Mode m) {
     return m == MODE_TEXT ? IM_COL32(143, 193, 255, 255)
            : m == MODE_SCRIPT ? IM_COL32(126, 230, 184, 255)
            : m == MODE_CHAT ? IM_COL32(236, 210, 145, 255)
+           : m == MODE_JS ? IM_COL32(196, 166, 255, 255)
                             : IM_COL32(255, 176, 176, 255);
+}
+// Draws every type tag a file carries (same labels as the web). Returns width.
+float draw_type_tags(float x, float y, int types) {
+    struct Def { int bit; const char *label; ImU32 fg; ImU32 bg; };
+    static const Def defs[] = {
+        {C7S_TYPE_TEXT, "Chat Payload", IM_COL32(143, 193, 255, 255), IM_COL32(47, 140, 255, 40)},
+        {C7S_TYPE_CIV7LDN, "Civ 7 LDN", IM_COL32(236, 210, 145, 255), IM_COL32(217, 182, 94, 40)},
+        {C7S_TYPE_SCRIPT, "Script", IM_COL32(126, 230, 184, 255), IM_COL32(60, 207, 145, 38)},
+        {C7S_TYPE_JS, "JS Payload", IM_COL32(196, 166, 255, 255), IM_COL32(140, 90, 255, 38)},
+    };
+    float x0 = x;
+    int drawn = 0;
+    for (const Def &d : defs) {
+        if (!(types & d.bit)) continue;
+        ImVec2 ts = draw::text_size(20, d.label, true);
+        float w = ts.x + 24, h = 30;
+        draw::rect(x, y, w, h, d.bg, 7);
+        draw::text(x + 12, y + (h - ts.y) / 2, 20, d.fg, d.label, true);
+        x += w + 8;
+        drawn++;
+    }
+    if (!drawn) {
+        ImVec2 ts = draw::text_size(20, "UNREADABLE", true);
+        float w = ts.x + 24;
+        draw::rect(x, y, w, 30, IM_COL32(255, 107, 107, 38), 7);
+        draw::text(x + 12, y + (30 - ts.y) / 2, 20, IM_COL32(255, 176, 176, 255), "UNREADABLE", true);
+        x += w + 8;
+    }
+    return x - x0;
+}
+float type_tags_w(int types) {
+    const char *labels[4] = {"Chat Payload", "Civ 7 LDN", "Script", "JS Payload"};
+    int bits[4] = {C7S_TYPE_TEXT, C7S_TYPE_CIV7LDN, C7S_TYPE_SCRIPT, C7S_TYPE_JS};
+    float w = 0;
+    int n = 0;
+    for (int i = 0; i < 4; i++)
+        if (types & bits[i]) { w += draw::text_size(20, labels[i], true).x + 24 + 8; n++; }
+    if (!n) w = draw::text_size(20, "UNREADABLE", true).x + 24 + 8;
+    return w;
 }
 
 void toggle_switch(float x, float y, bool on) {
@@ -619,16 +681,16 @@ void toggle_switch(float x, float y, bool on) {
 void draw_top(const C7sAppSnapshot &s, const UsbCompositeStatus *u) {
     draw::wordmark(MARGIN, 24, 48);
 
-    struct T { const char *label; } tabs[4] = {{"Send"}, {"Live input"}, {"Status"}, {"LDN"}};
-    float tw[4];
+    struct T { const char *label; } tabs[5] = {{"USB Macros"}, {"Live input"}, {"Webapp"}, {"LDN"}, {"JS"}};
+    float tw[5];
     float total = 0;
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < TAB_COUNT; i++) {
         tw[i] = draw::text_size(32, tabs[i].label, true).x + 72;
         total += tw[i];
     }
-    total += 3 * 16;
+    total += (TAB_COUNT - 1) * 16;
     float x = (W - total) / 2;
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < TAB_COUNT; i++) {
         bool on = (int)g_tab == i;
         g_tab_rects[i] = {x, TABS_Y, tw[i], 56};
         if (on) {
@@ -640,12 +702,24 @@ void draw_top(const C7sAppSnapshot &s, const UsbCompositeStatus *u) {
         x += tw[i] + 16;
     }
 
-    bool usb_ok = u && u->initialized && u->pad_ready && u->kbd_ready;
-    const char *usb_txt = (!u || !u->initialized) ? "Plug in USB" : usb_ok ? "Switch 2 linked" : "USB waiting";
-    ImU32 dot = (!u || !u->initialized) ? draw::ERR : usb_ok ? draw::OK : draw::ACCENT2;
-    float cw = draw::text_size(22, usb_txt, true).x + 50;
+    // Right-hand status chip is contextual to the tab:
+    //  USB Macros / Live -> USB link; Webapp / JS -> Wi-Fi; LDN -> LDN ready.
+    bool wifi = s.ip[0] && strcmp(s.ip, "unknown") != 0 && strcmp(s.ip, "0.0.0.0") != 0;
+    const char *chip_txt; ImU32 dot;
+    if (g_tab == TAB_LDN) {
+        chip_txt = wifi ? "LDN ready" : "LDN unavailable";
+        dot = wifi ? draw::OK : draw::ERR;
+    } else if (g_tab == TAB_CONNECT || g_tab == TAB_JS) {
+        chip_txt = wifi ? "Wi-Fi connected" : "Wi-Fi off";
+        dot = wifi ? draw::OK : draw::ERR;
+    } else {
+        bool usb_ok = u && u->initialized && u->pad_ready && u->kbd_ready;
+        chip_txt = (!u || !u->initialized) ? "Plug in USB" : usb_ok ? "Switch 2 linked" : "USB waiting";
+        dot = (!u || !u->initialized) ? draw::ERR : usb_ok ? draw::OK : draw::ACCENT2;
+    }
+    float cw = draw::text_size(22, chip_txt, true).x + 50;
     float cx = W - MARGIN - cw;
-    if (g_tab != TAB_LDN) draw::pill(cx, 34, usb_txt, dot);
+    draw::pill(cx, 34, chip_txt, dot);
 
     if (record_active()) {
         const char *rc = "REC";
@@ -740,7 +814,7 @@ void draw_send(const C7sAppSnapshot &s, const UsbCompositeStatus *u) {
 
         draw::file_icon(r.x + 20, r.y + 28, 48, mode_icon_col(g_modes[idx]));
         float tx = r.x + 84;
-        float tagw = mode_tag_w(g_modes[idx]);
+        float tagw = type_tags_w(e.types);
         char sz[32];
         format_size(e.size, sz, sizeof(sz));
         float szw = draw::text_size(22, sz).x;
@@ -752,7 +826,7 @@ void draw_send(const C7sAppSnapshot &s, const UsbCompositeStatus *u) {
         draw::text_clip(tx, r.y + 60, 23, draw::MUTED, meta, r.w - 84 - right_pad);
 
         float tagx = r.x + r.w - 20 - szw - 16 - tagw;
-        mode_tag(tagx, r.y + (r.h - 30) / 2, g_modes[idx]);
+        draw_type_tags(tagx, r.y + (r.h - 30) / 2, e.types);
         draw::text(r.x + r.w - 20 - szw, r.y + (r.h - 24) / 2, 22, draw::MUTED, sz);
     }
 
@@ -775,9 +849,9 @@ void draw_send(const C7sAppSnapshot &s, const UsbCompositeStatus *u) {
                         has_net_ip(s) ? draw::ACCENT : draw::GOLD, url, dw - 56);
     } else {
         C7sEntry &e = g_entries[g_cursor];
-        Mode m = g_modes[g_cursor];
+        Mode m = mode_from_types(e.types);
         float x = dx + 28, y = dy + 62;
-        mode_tag(x, y, m);
+        draw_type_tags(x, y, e.types);
         y += 44;
         draw::text_clip(x, y, 38, draw::TEXT, e.name, dw - 56, true);
         y += 50;
@@ -788,10 +862,10 @@ void draw_send(const C7sAppSnapshot &s, const UsbCompositeStatus *u) {
         else snprintf(factline, sizeof(factline), "%d lines    %s", e.lines, sz);
         draw::text_clip(x, y, 24, draw::MUTED, factline, dw - 56);
         y += 34;
-        if (e.mismatch) {
-            char w[160];
-            snprintf(w, sizeof(w), "Header says %d lines but the file has %d.", e.declared, e.lines);
-            draw::text_clip(x, y, 22, draw::ACCENT2, w, dw - 56);
+        if (e.desc[0]) {
+            char dline[300];
+            snprintf(dline, sizeof(dline), "\"%s\"", e.desc);
+            draw::text_clip(x, y, 22, draw::MUTED, dline, dw - 56);
             y += 28;
         }
         y += 6;
@@ -815,18 +889,34 @@ void draw_send(const C7sAppSnapshot &s, const UsbCompositeStatus *u) {
         const char *expl = m == MODE_TEXT ? "Types each line, then presses Enter."
                            : m == MODE_CHAT ? "Opens Civ 7 chat with the gamepad, types each line, and sends it."
                            : m == MODE_SCRIPT ? "Replays the recorded key and button timings."
+                           : m == MODE_JS ? "Use the JS tab to send this over Wi-Fi; USB send is disabled."
                                               : "This file could not be parsed.";
         draw::text_clip(x, y, 24, draw::MUTED, expl, dw - 56);
 
         float bw = dw - 56, bh = 112;
         float bx = dx + 28, by = dy + dh - 28 - bh;
         bool usb_ok = u && u->initialized && u->pad_ready && u->kbd_ready;
-        draw::rect(bx, by, bw, bh, usb_ok ? draw::ACCENT : draw::PANEL2, 16);
-        if (!usb_ok) draw::frame(bx, by, bw, bh, draw::LINE, 16, 1.5f);
-        const char *blabel = "Send to Switch 2";
-        ImVec2 bts = draw::text_size(40, blabel, true);
-        draw::button(bx + bw / 2 - bts.x / 2 - 60, by + (bh - 46) / 2, 46, ACT_CROSS);
-        draw::text(bx + bw / 2 - bts.x / 2, by + (bh - bts.y) / 2, 40, usb_ok ? draw::WHITE : draw::MUTED, blabel, true);
+        bool js_payload = (e.types & C7S_TYPE_JS) != 0;
+        bool can_usb = usb_ok && !js_payload;
+        ImU32 bg = can_usb ? draw::ACCENT
+                  : js_payload ? draw::PANEL2
+                               : IM_COL32(58, 44, 20, 255);
+        ImU32 border = can_usb ? draw::ACCENT
+                     : js_payload ? draw::LINE
+                                  : draw::GOLD;
+        ImU32 fg = can_usb ? draw::WHITE
+                 : js_payload ? draw::MUTED
+                              : draw::GOLD;
+        draw::rect(bx, by, bw, bh, bg, 18);
+        draw::frame(bx, by, bw, bh, border, 18, can_usb ? 2.0f : 1.5f);
+        draw::button(bx + 28, by + (bh - 56) / 2, 56, ACT_CROSS);
+        float tx = bx + 104;
+        draw::text(tx, by + 22, 38, fg, "Send to Switch 2 via USB", true);
+        const char *sub;
+        if (js_payload) sub = "Disabled: JS Payloads are sent over Wi-Fi from the JS tab.";
+        else if (!usb_ok) sub = "Disabled: USB interface not ready. Connect the USB link to Switch 2.";
+        else sub = "USB link ready. Press A or click to send.";
+        draw::text_clip(tx, by + 70, 22, can_usb ? draw::MUTED : fg, sub, bw - 132);
         g_start_rect = {bx, by, bw, bh};
     }
 
@@ -908,6 +998,27 @@ void draw_result(const C7sAppSnapshot &s) {
 
     Hint hints[] = {{ACT_CIRCLE, "Back"}, {ACT_CROSS, "Send again"}};
     draw_bottom(hints, 2);
+}
+
+// Pop the Switch software keyboard for a line of text. Returns false if
+// cancelled or empty. Blocks while the overlay is up (that's fine).
+bool ask_text(const char *header, const char *guide, const char *initial,
+              char *out, size_t outlen) {
+    SwkbdConfig kbd;
+    if (R_FAILED(swkbdCreate(&kbd, 0))) return false;
+    swkbdConfigMakePresetDefault(&kbd);
+    swkbdConfigSetType(&kbd, SwkbdType_Normal);
+    if (header) swkbdConfigSetHeaderText(&kbd, header);
+    if (guide) swkbdConfigSetGuideText(&kbd, guide);
+    if (initial && initial[0]) swkbdConfigSetInitialText(&kbd, initial);
+    swkbdConfigSetStringLenMax(&kbd, (u32)(outlen > 1 ? outlen - 1 : 1));
+    swkbdConfigSetReturnButtonFlag(&kbd, 0);  // OK/Enter submits a single line
+    out[0] = '\0';
+    Result rc = swkbdShow(&kbd, out, outlen);
+    swkbdClose(&kbd);
+    padUpdate(&g_pad);
+    g_prev_buttons = padGetButtons(&g_pad);
+    return R_SUCCEEDED(rc) && out[0];
 }
 
 // ---------- CONNECT ----------
@@ -1254,113 +1365,299 @@ void link_bars(float x, float cy, int level, ImU32 col) {
     }
 }
 
+void ldn_select_payload(int ent_idx);  // fwd
+
+// draws a selectable list row; returns the row rect.
+static Rect ldn_row(float x, float y, float w, const char *label, bool sel,
+                    ImU32 framecol, const char *right, ImU32 rightcol) {
+    draw::rect(x, y, w, 50, sel ? IM_COL32(33, 45, 72, 255) : draw::PANEL2, 10);
+    draw::frame(x, y, w, 50, framecol, 10, sel ? 2.0f : 1.2f);
+    float rw = right ? draw::text_size(20, right, true).x + 24 : 0;
+    draw::text_clip(x + 16, y + (50 - 23) / 2, 23, draw::TEXT, label, w - 24 - rw, true);
+    if (right) draw::text(x + w - 16 - (rw - 24), y + (50 - 20) / 2, 20, rightcol, right, true);
+    return {x, y, w, 50};
+}
+
+// A step-wizard. Stage is derived from the LDN state:
+//   1 NETWORK  : not joined -> scan + pick a network (with players)
+//   2 PAYLOAD  : joined, loader not sent -> pick the Civ7LDN payload + inject
+//   3 INJECTED : loader sent -> Test Chat + jump to the JS Payload tab
+static int ldn_stage() {
+    if (!ldn_route_connected()) return 1;
+    if (!ldn_route_loader_sent()) return 2;
+    return 3;
+}
+
+// Draws the "1 Network -> 2 Payload -> 3 Injected" stepper, returns its bottom Y.
+static float ldn_stepper(float x, float y, float w, int stage) {
+    static const char *labels[3] = {"NETWORK", "PAYLOAD", "INJECTED"};
+    float gap = 14, aw = (w - 2 * gap) / 3;
+    for (int i = 0; i < 3; i++) {
+        int step = i + 1;
+        bool cur = step == stage, done = step < stage;
+        float bx = x + i * (aw + gap);
+        ImU32 bg = cur ? IM_COL32(33, 45, 72, 255) : draw::PANEL2;
+        ImU32 fr = cur ? draw::ACCENT : done ? draw::OK : draw::LINE;
+        draw::rect(bx, y, aw, 46, bg, 12);
+        draw::frame(bx, y, aw, 46, fr, 12, cur ? 2.0f : 1.3f);
+        char lbl[48];
+        snprintf(lbl, sizeof(lbl), done ? "%d  %s  OK" : "%d  %s", step, labels[i]);
+        ImU32 tc = cur ? draw::WHITE : done ? draw::OK : draw::MUTED;
+        ImVec2 ts = draw::text_size(21, lbl, true);
+        draw::text(bx + (aw - ts.x) / 2, y + (46 - ts.y) / 2, 21, tc, lbl, true);
+    }
+    return y + 46;
+}
+
 void draw_ldn(const C7sAppSnapshot &s, const UsbCompositeStatus *u) {
     draw_top(s, u);
     float x = MARGIN, y = CONTENT_Y, w = W - 2 * MARGIN, h = CONTENT_H;
     draw::panel(x, y, w, h);
-
-    const float px = x + 32;       // inner left padding
-    const float pw = w - 64;       // inner content width
-
-    draw::text(px, y + 22, 34, draw::TEXT, "LDN injection", true);
-    draw::text(px, y + 70, 22, draw::MUTED,
-               "Push the RemoteJSLoader straight into a Civ 7 wireless lobby over local", false);
-    draw::text(px, y + 98, 22, draw::MUTED,
-               "wireless -- no USB cable, no prod.keys.", false);
+    const float px = x + 32, pw = w - 64;
 
     bool active = ldn_route_active();
     bool connected = ldn_route_connected();
-    int count = ldn_route_scan_count();
-    bool web = httpd_running();
+    int stage = ldn_stage();
 
-    // ---- status banner -------------------------------------------------
-    float by = y + 136, bh = 64;
-    draw::rect(px, by, pw, bh, draw::PANEL2, 14);
-    draw::frame(px, by, pw, bh, draw::LINE, 14, 1.2f);
-    // Phase: idle / scanning / found / registering / registered / sending.
-    const char *phase;
-    ImU32 dot;
-    bool spin;
-    if (connected)            { phase = "REGISTERED"; dot = draw::OK;      spin = true; }
-    else if (active)          { phase = "CONNECTING"; dot = draw::ACCENT2; spin = true; }
-    else if (count > 0)       { phase = "FOUND";      dot = draw::ACCENT;  spin = false; }
-    else                      { phase = "IDLE";       dot = draw::MUTED;   spin = false; }
-    if (spin) draw::spinner(px + 34, by + bh / 2, 13, dot);
-    else draw::dl()->AddCircleFilled(ImVec2(px + 34, by + bh / 2), 8, dot, 16);
-    draw::text(px + 62, by + 12, 18, dot, phase, true);
-    draw::text_clip(px + 62, by + 32, 24, draw::TEXT, ldn_route_status(), pw - 90, true);
+    // ---- header: title + status + stepper ----
+    draw::text(px, y + 20, 32, draw::TEXT, "LDN injection", true);
+    ImU32 scol = connected ? draw::OK : active ? draw::ACCENT2 : draw::MUTED;
+    if (active || connected) draw::spinner(px + pw - 16, y + 36, 11, scol);
+    draw::text_clip(px, y + 62, 22, scol, ldn_route_status(), pw - 30, false);
+    float sy = ldn_stepper(px, y + 96, pw, stage);
 
-    // ---- action buttons ------------------------------------------------
-    // State-based emphasis: the single next step glows. Scan is the call to
-    // action until a lobby is registered; then Send takes over.
-    float ay = by + bh + 22, abh = 64;
-    g_ldn_scan_rect = {px, ay, 300, abh};
-    draw::accent_button(g_ldn_scan_rect.x, g_ldn_scan_rect.y, g_ldn_scan_rect.w,
-                        g_ldn_scan_rect.h, count ? "RESCAN  (Y)" : "SCAN  (Y)", !active && !connected);
-    g_ldn_send_rect = {px + 324, ay, 470, abh};
-    if (connected) {
-        draw::accent_button(g_ldn_send_rect.x, g_ldn_send_rect.y, g_ldn_send_rect.w,
-                            g_ldn_send_rect.h, "SEND REMOTEJSLOADER  (X)", true);
+    float bodyy = sy + 24;
+    float bodyh = (y + h) - bodyy - 18;
+    float acty = bodyy + bodyh - 56;   // primary action row
+
+    // Reset default rects (only the active stage's are hit-tested meaningfully).
+    g_ldn_send_rect = g_ldn_test_rect = g_ldn_js_rect = {0, 0, 0, 0};
+
+    if (stage == 1) {
+        // ---- STAGE 1: pick a network ----
+        int count = ldn_route_scan_count();
+        g_ldn_scan_rect = {px, acty, pw, 56};
+        draw::accent_button(px, acty, pw, 56,
+                            active ? "SCANNING..." : count ? "RESCAN" : "SCAN FOR CIV 7 LOBBIES",
+                            !active);
+
+        draw::text(px, bodyy, 20, draw::MUTED, "NETWORKS WITH PLAYERS  (tap to join)", true);
+        float nry = bodyy + 30;
+        g_ldn_row_count = 0;
+        for (int i = 0; i < count && i < 24; i++) {
+            const LdnLobbyInfo *li = ldn_route_scan_item(i);
+            if (!li) break;
+            if (li->node_count == 0) continue;
+            if (nry + 56 > acty - 12) break;
+            bool sel = (g_ldn_row_count == g_ldn_selected);
+            const char *rt = sel ? (li->joinable ? "A  JOIN" : "x") : NULL;
+            ImU32 rc = li->joinable ? draw::ACCENT : draw::ERR;
+            ImU32 fc = sel ? draw::ACCENT : (li->joinable ? draw::LINE : draw::ERR);
+            g_ldn_row_ent[g_ldn_row_count] = i;
+            g_ldn_row_rects[g_ldn_row_count++] =
+                ldn_row(px, nry, pw, li->ssid[0] ? li->ssid : "(hidden)", sel, fc, rt, rc);
+            nry += 58;
+        }
+        if (g_ldn_row_count == 0)
+            draw::text(px, nry + 10, 22, draw::MUTED,
+                       active ? "Scanning the local wireless..."
+                              : "Open the Civ 7 wireless lobby on the Switch 2, then Scan.", false);
+
+        Hint hints[] = {{ACT_UP, "Select"}, {ACT_CROSS, "Join"},
+                        {ACT_SQUARE, "Scan"}, {ACT_CIRCLE, "Stop"}};
+        draw_bottom(hints, 4);
+    } else if (stage == 2) {
+        // ---- STAGE 2: pick the Civ7LDN payload and inject it ----
+        draw::text(px, bodyy, 20, draw::MUTED, "LOADER PAYLOAD  (.C7S Civ 7 LDN, tap to select)", true);
+        float pry = bodyy + 30;
+        g_ldn_pay_count = 0;
+        for (int i = 0; i < g_count && g_ldn_pay_count < 64; i++) {
+            if (!(g_entries[i].types & C7S_TYPE_CIV7LDN)) continue;
+            if (pry + 56 > acty - 12) break;
+            bool psel = g_ldn_pay_name[0] && strcmp(g_entries[i].name, g_ldn_pay_name) == 0;
+            g_ldn_pay_ent[g_ldn_pay_count] = i;
+            g_ldn_pay_rects[g_ldn_pay_count++] =
+                ldn_row(px, pry, pw, g_entries[i].name, psel,
+                        psel ? draw::ACCENT : draw::LINE, psel ? "SELECTED" : NULL, draw::ACCENT);
+            pry += 58;
+        }
+        if (g_ldn_pay_count == 0) {
+            draw::text(px, pry + 10, 22, draw::MUTED, "No Civ7LDN payloads on the SD card.", false);
+            draw::text(px, pry + 40, 22, draw::MUTED, "Upload one from the web app.", false);
+        } else if (!g_ldn_pay_name[0]) {
+            int pick = g_ldn_pay_ent[0];
+            for (int i = 0; i < g_ldn_pay_count; i++)
+                if (strstr(g_entries[g_ldn_pay_ent[i]].name, "RemoteJSLoader")) { pick = g_ldn_pay_ent[i]; break; }
+            ldn_select_payload(pick);
+        }
+
+        bool canSend = g_ldn_pay_name[0];
+        float gap2 = 16, inw = (pw - gap2) * 2 / 3, tcw = pw - gap2 - inw;
+        g_ldn_send_rect = {px, acty, inw, 56};
+        if (canSend) {
+            char lbl[160];
+            snprintf(lbl, sizeof(lbl), "INJECT  %s", g_ldn_pay_name);
+            draw::accent_button(px, acty, inw, 56, lbl, true);
+        } else {
+            draw::rect(px, acty, inw, 56, draw::PANEL, 12);
+            draw::frame(px, acty, inw, 56, draw::LINE, 12, 1.2f);
+            ImVec2 ts = draw::text_size(26, "PICK A PAYLOAD", true);
+            draw::text(px + (inw - ts.x) / 2, acty + (56 - ts.y) / 2, 26, draw::MUTED, "PICK A PAYLOAD", true);
+        }
+        g_ldn_test_rect = {px + inw + gap2, acty, tcw, 56};
+        draw::rect(g_ldn_test_rect.x, acty, tcw, 56, draw::PANEL2, 12);
+        draw::frame(g_ldn_test_rect.x, acty, tcw, 56, draw::LINE, 12, 1.4f);
+        {
+            ImVec2 ts2 = draw::text_size(24, "TEST CHAT", true);
+            draw::text(g_ldn_test_rect.x + (tcw - ts2.x) / 2, acty + (56 - ts2.y) / 2, 24, draw::TEXT, "TEST CHAT", true);
+        }
+
+        Hint hints[] = {{ACT_UP, "Select"}, {ACT_CROSS, "Inject"},
+                        {ACT_TRIANGLE, "Test chat"}, {ACT_L2, "Cycle"}};
+        draw_bottom(hints, 4);
     } else {
-        // Reachable only once registered -- show it dimmed so the flow reads.
-        draw::rect(g_ldn_send_rect.x, g_ldn_send_rect.y, g_ldn_send_rect.w, g_ldn_send_rect.h, draw::PANEL, 12);
-        draw::frame(g_ldn_send_rect.x, g_ldn_send_rect.y, g_ldn_send_rect.w, g_ldn_send_rect.h, draw::LINE, 12, 1.2f);
-        ImVec2 ts = draw::text_size(30, "SEND REMOTEJSLOADER", true);
-        draw::text(g_ldn_send_rect.x + (g_ldn_send_rect.w - ts.x) / 2,
-                   g_ldn_send_rect.y + (abh - ts.y) / 2, 30, draw::MUTED, "SEND REMOTEJSLOADER", true);
-    }
-    g_ldn_stop_rect = {px + pw - 240, ay, 240, abh};
-    draw::red_button(g_ldn_stop_rect.x, g_ldn_stop_rect.y, g_ldn_stop_rect.w,
-                     g_ldn_stop_rect.h, "STOP  (B)", false);
+        // ---- STAGE 3: loader injected; special scripts go over the JS tab ----
+        draw::dl()->AddCircleFilled(ImVec2(px + 14, bodyy + 20), 9, draw::OK, 20);
+        draw::text(px + 36, bodyy + 6, 30, draw::OK, "RemoteJSLoader injected", true);
+        const char *l1 = "The Switch 2 is now running the loader (JS server on port 9026).";
+        const char *l2 = "To push the save file or other special scripts, open the JS Payload";
+        const char *l3 = "tab -- it finds the loader over Wi-Fi and sends your .js payloads.";
+        draw::text(px + 36, bodyy + 50, 22, draw::MUTED, l1, false);
+        draw::text(px + 36, bodyy + 80, 22, draw::MUTED, l2, false);
+        draw::text(px + 36, bodyy + 108, 22, draw::MUTED, l3, false);
 
-    // ---- setup hint + web-server state --------------------------------
-    float hy = ay + abh + 20;
-    draw::text(px, hy, 21, draw::MUTED,
-               "Switch 2:  MULTIPLAYER -> WIRELESS -> CREATE GAME -> HOST LOBBY (+),  keep it open, then Scan.", false);
-    draw::dl()->AddCircleFilled(ImVec2(px + 6, hy + 36), 5, web ? draw::OK : draw::GOLD, 12);
-    draw::text(px + 20, hy + 26, 21, web ? draw::OK : draw::GOLD,
-               web ? "Web server running" : "Web server paused while LDN runs -- it restarts when you Stop", false);
+        g_ldn_js_rect = {px, acty, pw, 56};
+        draw::accent_button(px, acty, pw, 56, "GO TO JS PAYLOAD  >", true);
 
-    // ---- lobby list ----------------------------------------------------
-    float listy = hy + 64;
-    draw::text(px, listy, 20, draw::MUTED, "LOBBIES", true);
-    float ry = listy + 32;
-    g_ldn_row_count = 0;
-    for (int i = 0; i < count && i < 24; i++) {
-        const LdnLobbyInfo *li = ldn_route_scan_item(i);
-        if (!li) break;
-        if (ry + 62 > y + h - 20) break;
-        bool sel = (i == g_ldn_selected);
-        bool reg = connected && sel;
-        g_ldn_row_rects[g_ldn_row_count++] = {px, ry, pw, 58};
-        draw::rect(px, ry, pw, 58, sel ? IM_COL32(33, 45, 72, 255) : draw::PANEL2, 12);
-        draw::frame(px, ry, pw, 58,
-                    reg ? draw::OK : sel ? draw::ACCENT : (li->joinable ? draw::LINE : draw::ERR),
-                    12, sel ? 2.0f : 1.2f);
-        char line[160];
-        snprintf(line, sizeof(line), "%s", li->ssid[0] ? li->ssid : "(hidden)");
-        draw::text_clip(px + 22, ry + (58 - 26) / 2, 26, draw::TEXT, line, 460, true);
-        snprintf(line, sizeof(line), "%d/%d players   ch %d",
-                 (int)li->node_count, (int)li->node_count_max, (int)li->channel);
-        draw::text(px + 520, ry + (58 - 22) / 2, 22, draw::MUTED, line, false);
-        link_bars(px + 820, ry + 29, li->link_level, li->joinable ? draw::OK : draw::MUTED);
-        const char *rtxt = reg ? "REGISTERED" : li->joinable ? "A  REGISTER" : li->problem;
-        ImU32 rcol = reg ? draw::OK : li->joinable ? draw::ACCENT : draw::ERR;
-        ImVec2 rts = draw::text_size(22, rtxt, true);
-        draw::text(px + pw - 24 - rts.x, ry + (58 - 22) / 2, 22, rcol, rtxt, true);
-        ry += 58 + 8;
+        Hint hints[] = {{ACT_CROSS, "JS tab"}, {ACT_CIRCLE, "Stop"}, {ACT_NONE, ""}, {ACT_NONE, ""}};
+        draw_bottom(hints, 2);
     }
-    if (g_ldn_row_count == 0) {
-        draw::rect(px, ry, pw, 58, draw::PANEL2, 12);
-        draw::frame(px, ry, pw, 58, draw::LINE, 12, 1.2f);
-        draw::text(px + 22, ry + (58 - 22) / 2, 22, draw::MUTED,
-                   active ? "Scanning for Civ 7 lobbies..."
-                          : "No lobbies yet -- open the Switch 2 lobby, then Scan.", false);
+}
+
+void ldn_select_payload(int ent_idx) {
+    if (ent_idx < 0 || ent_idx >= g_count) return;
+    snprintf(g_ldn_pay_name, sizeof(g_ldn_pay_name), "%s", g_entries[ent_idx].name);
+    ldn_route_set_payload(g_ldn_pay_name);
+}
+void ldn_pick_next_payload() {
+    if (g_ldn_pay_count <= 0) return;
+    int cur = -1;
+    for (int i = 0; i < g_ldn_pay_count; i++)
+        if (strcmp(g_entries[g_ldn_pay_ent[i]].name, g_ldn_pay_name) == 0) { cur = i; break; }
+    ldn_select_payload(g_ldn_pay_ent[(cur + 1) % g_ldn_pay_count]);
+}
+void ldn_prompt_test_chat() {
+    char text[480] = {0};
+    if (ask_text("Civ 7 chat", "Type a line, then OK to send", "", text, sizeof(text)))
+        ldn_route_send_chat(text);
+}
+
+// ---- JS Payload tab ----
+void js_refresh_list() {
+    g_js_count = remote_js_list(g_js_names, 64);
+    if (g_js_selected >= g_js_count) g_js_selected = g_js_count > 0 ? g_js_count - 1 : 0;
+    if (g_js_selected < 0) g_js_selected = 0;
+}
+
+void js_send_selected() {
+    if (g_js_count <= 0 || remote_js_busy()) return;
+    remote_js_send(g_js_names[g_js_selected]);
+}
+
+void draw_js(const C7sAppSnapshot &s, const UsbCompositeStatus *u) {
+    draw_top(s, u);
+    float x = MARGIN, y = CONTENT_Y, w = W - 2 * MARGIN, h = CONTENT_H;
+    draw::panel(x, y, w, h);
+    const float px = x + 32, pw = w - 64;
+
+    uint64_t now = ticks_ms();
+    if (now - g_js_refresh_at > 1000) { g_js_refresh_at = now; js_refresh_list(); }
+
+    RjsPhase ph = remote_js_phase();
+    bool busy = remote_js_busy();
+    bool have = remote_js_have_loader();
+
+    draw::text(px, y + 20, 32, draw::TEXT, "JS payload injection", true);
+    ImU32 scol = ph == RJS_ERROR ? draw::ERR
+               : (have || ph == RJS_DONE) ? draw::OK
+               : busy ? draw::ACCENT2 : draw::MUTED;
+    if (busy) draw::spinner(px + pw - 16, y + 36, 11, scol);
+    draw::text_clip(px, y + 62, 22, scol, remote_js_status(), pw - 30, false);
+
+    // ---- top row: FIND/RESCAN | loader chip ----
+    float ay = y + 98, abh = 54;
+    g_js_scan_rect = {px, ay, 340, abh};
+    draw::accent_button(px, ay, 340, abh,
+                        busy ? "SCANNING..." : have ? "RESCAN WI-FI" : "FIND LOADER ON WI-FI", !busy);
+    {
+        const char *lt = have ? remote_js_loader_ip_str() : "no loader found yet";
+        ImU32 d = have ? draw::OK : draw::MUTED;
+        draw::dl()->AddCircleFilled(ImVec2(px + 364, ay + abh / 2), 5, d, 12);
+        draw::text(px + 378, ay + (abh - 20) / 2, 20, d, lt, false);
     }
 
-    Hint hints[] = {{ACT_UP, "Pick lobby"}, {ACT_CROSS, "Register"},
-                    {ACT_SQUARE, "Scan"}, {ACT_TRIANGLE, "Send"}};
-    draw_bottom(hints, 4);
+    // ---- list of .js payloads ----
+    float ly = ay + abh + 22;
+    draw::text(px, ly, 20, draw::MUTED, "JS PAYLOADS  (.C7S / .js)", true);
+    float ry = ly + 32;
+    float sendy = y + h - 76;
+    int max_rows = (int)((sendy - 12 - ry) / 58);
+    if (max_rows < 1) max_rows = 1;
+    if (g_js_selected < g_js_first) g_js_first = g_js_selected;
+    if (g_js_selected >= g_js_first + max_rows) g_js_first = g_js_selected - max_rows + 1;
+    if (g_js_first < 0) g_js_first = 0;
+    for (int i = g_js_first; i < g_js_count; i++) {
+        if (ry + 56 > sendy - 12) break;
+        bool sel = (i == g_js_selected);
+        g_js_row_rects[i] = ldn_row(px, ry, pw, g_js_names[i], sel,
+                                    sel ? draw::ACCENT : draw::LINE,
+                                    sel ? "A  SEND" : NULL, draw::ACCENT);
+        ry += 58;
+    }
+    if (g_js_count == 0) {
+        draw::text(px, ry + 10, 22, draw::MUTED, "No .js payloads in the C7S folder yet.", false);
+        char jsurl[160];
+        web_url(s, jsurl, sizeof(jsurl));
+        if (has_net_ip(s)) {
+            char m[256];
+            snprintf(m, sizeof(m), "Upload a JS file from the webapp accessible at %s", jsurl);
+            draw::text_clip(px, ry + 38, 22, draw::MUTED, m, pw, false);
+        } else {
+            draw::text(px, ry + 38, 22, draw::MUTED, "Connect to a network to use the web app.", false);
+        }
+    }
+
+    // ---- bottom SEND button ----
+    bool canSend = g_js_count > 0 && !busy;
+    g_js_send_rect = {px, sendy, pw, 56};
+    if (canSend) {
+        char lbl[160];
+        snprintf(lbl, sizeof(lbl), "SEND  %s", g_js_names[g_js_selected]);
+        draw::accent_button(px, sendy, pw, 56, lbl, true);
+    } else {
+        draw::rect(px, sendy, pw, 56, draw::PANEL, 12);
+        draw::frame(px, sendy, pw, 56, draw::LINE, 12, 1.2f);
+        char msg[256];
+        const char *t = "SELECT A .js PAYLOAD";
+        if (busy) {
+            t = "WORKING...";
+        } else if (g_js_count == 0) {
+            char jsurl[160];
+            web_url(s, jsurl, sizeof(jsurl));
+            if (has_net_ip(s)) snprintf(msg, sizeof(msg), "Upload a JS file from the webapp accessible at %s", jsurl);
+            else snprintf(msg, sizeof(msg), "Connect to a network to use the web app.");
+            t = msg;
+        }
+        if (g_js_count == 0) {
+            draw::text_clip(px + 18, sendy + (56 - 24) / 2, 22, draw::MUTED, t, pw - 36, false);
+        } else {
+            ImVec2 ts = draw::text_size(26, t, true);
+            draw::text(px + (pw - ts.x) / 2, sendy + (56 - ts.y) / 2, 26, draw::MUTED, t, true);
+        }
+    }
+
+    Hint hints[] = {{ACT_UP, "Select"}, {ACT_CROSS, "Send"}, {ACT_SQUARE, "Scan"}};
+    draw_bottom(hints, 3);
 }
 
 void open_menu() {
@@ -1455,12 +1752,17 @@ void menu_input(Input &in) {
 }
 
 void start_selected() {
-    const UsbCompositeStatus *u = usb_composite_status();
-    if (!u->initialized) {
-        set_toast("USB did not initialize: %s", u->stage[0] ? u->stage : "check usb.log");
+    if (g_count <= 0 || g_cursor < 0 || g_cursor >= g_count) return;
+    if (g_entries[g_cursor].types & C7S_TYPE_JS) {
+        set_toast("JS Payload: send it from the JS tab over Wi-Fi");
         return;
     }
-    if (g_count <= 0) return;
+    const UsbCompositeStatus *u = usb_composite_status();
+    bool usb_ok = u && u->initialized && u->pad_ready && u->kbd_ready;
+    if (!usb_ok) {
+        set_toast("USB interface not ready: %s", u && u->stage[0] ? u->stage : "connect USB to Switch 2");
+        return;
+    }
     app_request_start(g_entries[g_cursor].name);
     set_toast("Starting in 5s - focus the target text field");
     g_overlay = OV_RUNNING;
@@ -1469,6 +1771,7 @@ void start_selected() {
 void set_tab(Tab t) {
     if (t == g_tab) return;
     if (g_tab == TAB_LIVE) leave_live();
+    if (g_tab == TAB_LDN) ldn_route_stop();  // leaving LDN stops the service
     g_tab = t;
     if (g_tab == TAB_LIVE) enter_live();
 }
@@ -1493,10 +1796,10 @@ void handle_input(const Input &in, const C7sAppSnapshot &s) {
     }
 
     // tab switching (shoulders)
-    if (in.l) set_tab((Tab)((g_tab + 3) % 4));
-    if (in.r) set_tab((Tab)((g_tab + 1) % 4));
+    if (in.l) set_tab((Tab)((g_tab + TAB_COUNT - 1) % TAB_COUNT));
+    if (in.r) set_tab((Tab)((g_tab + 1) % TAB_COUNT));
     if (in.touch) {
-        for (int i = 0; i < 4; i++)
+        for (int i = 0; i < TAB_COUNT; i++)
             if (g_tab_rects[i].hit(in.tx, in.ty)) set_tab((Tab)i);
     }
 
@@ -1523,33 +1826,54 @@ void handle_input(const Input &in, const C7sAppSnapshot &s) {
             if (in.touch_up) live_key_release();
             break;
         case TAB_LDN: {
-            // Lobby-centric controls. Up/Down picks a lobby; A registers it;
-            // Y (re)scans; X sends the loader; B stops. Touch mirrors all of it.
-            int count = ldn_route_scan_count();
-            if (count > 0 && g_ldn_selected >= count) g_ldn_selected = count - 1;
-            if (in.up && count > 0) g_ldn_selected = (g_ldn_selected + count - 1) % count;
-            if (in.down && count > 0) g_ldn_selected = (g_ldn_selected + 1) % count;
-            if (in.a && count > 0) ldn_route_join(g_ldn_selected);
-            if (in.y) { ldn_route_scan(); g_ldn_selected = 0; }
-            if (in.x) ldn_route_send_loader();
-            if (in.b) ldn_route_stop();
-            if (in.touch) {
-                if (!ldn_route_active() && g_ldn_scan_rect.hit(in.tx, in.ty)) {
-                    ldn_route_scan();
-                    g_ldn_selected = 0;
-                } else if (g_ldn_stop_rect.hit(in.tx, in.ty)) {
-                    ldn_route_stop();
-                } else if (ldn_route_connected() && g_ldn_send_rect.hit(in.tx, in.ty)) {
-                    ldn_route_send_loader();
-                } else {
-                    for (int i = 0; i < g_ldn_row_count; i++) {
-                        if (g_ldn_row_rects[i].hit(in.tx, in.ty)) {
-                            g_ldn_selected = i;
-                            ldn_route_join(i);
-                            break;
-                        }
+            // Stage-aware wizard. STOP (B) works in every stage.
+            if (in.b) { ldn_route_stop(); break; }
+
+            int stage = ldn_stage();
+            if (stage == 1) {
+                // Pick a network: Up/Down select, A join, Y scan.
+                int nrows = g_ldn_row_count;
+                if (g_ldn_selected >= nrows) g_ldn_selected = nrows > 0 ? nrows - 1 : 0;
+                if (g_ldn_selected < 0) g_ldn_selected = 0;
+                if (in.up && nrows > 0) g_ldn_selected = (g_ldn_selected + nrows - 1) % nrows;
+                if (in.down && nrows > 0) g_ldn_selected = (g_ldn_selected + 1) % nrows;
+                if (in.a && nrows > 0) ldn_route_join(g_ldn_row_ent[g_ldn_selected]);
+                if (in.y) { ldn_route_scan(); g_ldn_selected = 0; }
+                if (in.touch) {
+                    if (!ldn_route_active() && g_ldn_scan_rect.hit(in.tx, in.ty)) {
+                        ldn_route_scan();
+                        g_ldn_selected = 0;
+                    } else {
+                        for (int i = 0; i < g_ldn_row_count; i++)
+                            if (g_ldn_row_rects[i].hit(in.tx, in.ty)) {
+                                g_ldn_selected = i;
+                                ldn_route_join(g_ldn_row_ent[i]);
+                                break;
+                            }
                     }
                 }
+            } else if (stage == 2) {
+                // Pick the payload: Up/Down/ZL cycle, A inject, X test chat.
+                if (in.up || in.down || in.zl) ldn_pick_next_payload();
+                if (in.a) ldn_route_send_loader();
+                if (in.x) ldn_prompt_test_chat();
+                if (in.touch) {
+                    if (g_ldn_send_rect.hit(in.tx, in.ty)) {
+                        ldn_route_send_loader();
+                    } else if (g_ldn_test_rect.hit(in.tx, in.ty)) {
+                        ldn_prompt_test_chat();
+                    } else {
+                        for (int i = 0; i < g_ldn_pay_count; i++)
+                            if (g_ldn_pay_rects[i].hit(in.tx, in.ty)) {
+                                ldn_select_payload(g_ldn_pay_ent[i]);
+                                break;
+                            }
+                    }
+                }
+            } else {
+                // Injected: A jumps to the JS Payload tab.
+                if (in.a) set_tab(TAB_JS);
+                if (in.touch && g_ldn_js_rect.hit(in.tx, in.ty)) set_tab(TAB_JS);
             }
             break;
         }
@@ -1560,6 +1884,28 @@ void handle_input(const Input &in, const C7sAppSnapshot &s) {
                 else set_toast("Web server failed to start");
             }
             break;
+        case TAB_JS: {
+            // Up/Down pick a .js payload; A/Cross sends it. Y scans the Wi-Fi
+            // for the loader; B forgets it. Touch mirrors everything.
+            int n = g_js_count;
+            if (n > 0) {
+                if (in.up) g_js_selected = (g_js_selected + n - 1) % n;
+                if (in.down) g_js_selected = (g_js_selected + 1) % n;
+            }
+            if (in.a) js_send_selected();
+            if (in.y) remote_js_scan();
+            if (in.touch) {
+                if (g_js_scan_rect.hit(in.tx, in.ty)) {
+                    remote_js_scan();
+                } else if (g_js_send_rect.hit(in.tx, in.ty)) {
+                    js_send_selected();
+                } else {
+                    for (int i = 0; i < g_js_count; i++)
+                        if (g_js_row_rects[i].hit(in.tx, in.ty)) { g_js_selected = i; break; }
+                }
+            }
+            break;
+        }
     }
 }
 
@@ -1664,6 +2010,7 @@ extern "C" int c7s_ui_run(void) {
             case TAB_LIVE: draw_live(s, u); break;
             case TAB_CONNECT: draw_connect(s, u); break;
             case TAB_LDN: draw_ldn(s, u); break;
+            case TAB_JS: draw_js(s, u); break;
         }
         if (g_overlay == OV_RUNNING) draw_running(s);
         else if (g_overlay == OV_RESULT) draw_result(s);

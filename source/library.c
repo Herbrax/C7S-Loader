@@ -45,10 +45,10 @@ int c7s_list(C7sEntry *out, int max) {
         C7sPayload p;
         if (c7s_parse_file(path, &p)) {
             ent->header = p.header_valid;
-            ent->declared = p.declared_count;
+            ent->types = p.types;
             ent->lines = p.line_count;
-            ent->mismatch = p.count_mismatch;
             snprintf(ent->title, sizeof(ent->title), "%s", p.title);
+            snprintf(ent->desc, sizeof(ent->desc), "%s", p.desc);
             c7s_free(&p);
         }
         n++;

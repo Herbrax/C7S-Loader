@@ -70,7 +70,14 @@ bool c7s_macro_build(const C7sPayload *payload, C7sMacro *out, char *err, size_t
     }
     size_t n = 0;
 
-    if (payload->script) {
+    /* A Civ7LDN-only payload has no keyboard/gamepad representation. */
+    if (!c7s_is_script(payload) && !c7s_is_text(payload)) {
+        free(steps);
+        snprintf(err, errlen, "this file is LDN-only; send it from the LDN tab");
+        return false;
+    }
+
+    if (c7s_is_script(payload)) {
         uint8_t kmod = 0;
         uint8_t kkey = 0;
         C7sPadReport pad;
@@ -103,7 +110,10 @@ bool c7s_macro_build(const C7sPayload *payload, C7sMacro *out, char *err, size_t
         return true;
     }
 
-    if (payload->plain) {
+    /* Plain keyboard typing is for Text-only files. A Text+Civ7LDN file (the
+     * RemoteJS loader) falls through to the chat delivery below, which uses the
+     * gamepad to reach the Civ 7 chat field before typing each line. */
+    if (c7s_is_text(payload) && !c7s_is_ldn(payload)) {
         for (int line = 0; line < payload->line_count; line++) {
             int prev_key = -1;
             const char *p = payload->lines[line];

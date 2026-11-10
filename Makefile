@@ -87,7 +87,7 @@ WEB_ASSETS := $(CURDIR)/include/web_assets.h
 MHD_LIB    := $(CURDIR)/.deps/switch/lib/libmicrohttpd.a
 FONTS_DATA := $(CURDIR)/source/fonts_data.c
 PRELOAD_DATA := $(CURDIR)/source/preload_data.c
-PRELOAD_SRC  := $(CURDIR)/payloads/CIV7-RemoteJSLoader.C7S $(CURDIR)/payloads/CIV7-Reach-Chat-Input.C7S
+PRELOAD_SRC  := $(CURDIR)/payloads/CIV7-RemoteJSLoader.C7S $(CURDIR)/payloads/CIV7-Reach-Chat-Input.C7S $(CURDIR)/payloads/Civ7SaveInstaller.C7S
 
 all: $(BUILD)
 
@@ -110,8 +110,8 @@ $(BUILD): deps
 	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
 
 dist: $(BUILD)
+	@rm -rf dist/switch/C7S-Loader
 	@mkdir -p dist/switch/C7S-Loader
-	@rm -f dist/switch/C7S-Loader/*.C7S
 	@cp $(TARGET).nro dist/switch/
 	@cp payloads/*.C7S dist/switch/C7S-Loader/
 	@echo "SD layout ready in dist/switch"

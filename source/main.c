@@ -11,6 +11,7 @@
 #include "httpd.h"
 #include "ldn_route.h"
 #include "live.h"
+#include "remote_js.h"
 #include "preload.h"
 #include "record.h"
 #include "settings.h"
@@ -56,6 +57,7 @@ int main(int argc, char **argv) {
     // Stop on the LDN tab. A later scan re-initialises the service on demand.
     ldn_route_init();
     ldn_route_stop();
+    remote_js_init();
     local_ip(ip, sizeof(ip));
     app_set_ip(ip);
 

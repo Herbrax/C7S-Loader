@@ -55,6 +55,7 @@ button:disabled { opacity: .45; cursor: default; filter: none; }
 .btn.ghost, button.ghost { background: transparent; }
 .btn.block, button.block { width: 100%; }
 .btn.lg, button.lg { padding: 16px; font-size: 18px; border-radius: 14px; }
+.btn.sm, button.sm { padding: 6px 14px; font-size: 13px; border-radius: 8px; }
 .link { background: none; border: 0; color: var(--accent); font: inherit; text-decoration: underline; cursor: pointer; padding: 0; }
 
 /* drop */

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Embed the two default C7S payloads into the NRO for first-run preloading."""
+"""Embed the default C7S payloads and save installer into the NRO."""
 
 from pathlib import Path
 
@@ -7,6 +7,7 @@ ROOT = Path(__file__).resolve().parent.parent
 FILES = [
     ("c7s_preload_remote_js", "CIV7-RemoteJSLoader.C7S"),
     ("c7s_preload_reach_chat", "CIV7-Reach-Chat-Input.C7S"),
+    ("c7s_preload_save_installer", "Civ7SaveInstaller.C7S"),
 ]
 
 

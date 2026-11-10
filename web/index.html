@@ -13,6 +13,7 @@
     <button class="tabbtn on" data-tab="send"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12h13M12 5l7 7-7 7"/></svg>Send</button>
     <button class="tabbtn" data-tab="live"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><rect x="2.5" y="6" width="19" height="12" rx="3"/><path d="M6.5 10h1M10 10h1M13.5 10h1M17 10h1M8 14h8"/></svg>Live input</button>
     <button class="tabbtn" data-tab="ldn"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M4.5 9.5a10 10 0 0 1 15 0M7.5 13a6 6 0 0 1 9 0M10.5 16.5a2.5 2.5 0 0 1 3 0M12 20h.01"/></svg>LDN</button>
+    <button class="tabbtn" data-tab="js"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 5 3 12l5 7M16 5l5 7-5 7"/></svg>JS Payload</button>
     <button class="tabbtn" data-tab="status"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 20v-6m-5 6v-9m10 9V8M4 20h16"/></svg>Status</button>
   </nav>
   <div class="hstat"><span class="chip" id="linkChip"><span class="dot" id="linkDot"></span><span id="linkText">connecting…</span></span></div>
@@ -24,12 +25,37 @@
     <div id="drop" class="drop">
       <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#8fc1ff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V4M8 8l4-4 4 4M5 15v3a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-3"/></svg></div>
       <div>
-        <div><b>Drop a .C7S file here</b> or <button id="browse" class="link">browse</button></div>
-        <div class="muted" style="font-size:13px">Saved to /switch/C7S-Loader on the console's SD card.</div>
+        <div><b>Drop a .C7S or text file</b> or <button id="browse" class="link">browse</button></div>
+        <div class="muted" style="font-size:13px">A <b>.C7S</b> uploads as-is. A <b>.txt</b> (or any text) opens the converter so you pick its format. Saved to /switch/C7S-Loader.</div>
         <div id="uploadMsg" class="msg"></div>
       </div>
     </div>
-    <input id="file" type="file" accept=".c7s,.C7S" hidden>
+    <input id="file" type="file" accept=".c7s,.C7S,.txt,.text,.md,.js,.json,text/plain" hidden>
+  </div>
+
+  <!-- text -> .C7S converter -->
+  <div class="card hidden" id="convCard">
+    <h2>Convert to .C7S <span class="muted" id="convSrc" style="text-transform:none;letter-spacing:0;font-weight:400;margin-left:8px"></span></h2>
+    <div class="row2">
+      <label class="field" style="flex-direction:column;align-items:stretch;gap:6px">Title
+        <input type="text" id="convTitle" style="width:100%">
+      </label>
+      <label class="field" style="flex-direction:column;align-items:stretch;gap:6px">Description (optional)
+        <input type="text" id="convDesc" style="width:100%">
+      </label>
+    </div>
+    <div class="subh" style="margin-top:14px">Format (pick one or both)</div>
+    <div class="toolbar">
+      <div class="toggle" id="convLdnTog"><span class="sw on" id="convLdnSw"></span>Civ 7 LDN</div>
+      <div class="toggle" id="convTextTog"><span class="sw" id="convTextSw"></span>Chat Payload (keyboard)</div>
+      <span class="spacer"></span>
+      <span class="muted" id="convInfo" style="font-size:12.5px"></span>
+    </div>
+    <div style="display:flex;gap:12px;margin-top:16px;align-items:center">
+      <button class="btn primary" id="convGo">Convert &amp; upload</button>
+      <button class="btn ghost" id="convCancel">Cancel</button>
+      <span class="msg" id="convMsg"></span>
+    </div>
   </div>
 
   <div class="runbar hidden" id="runbar">
@@ -161,7 +187,10 @@
       <div class="files" id="ldnList">
         <div class="empty"><div class="big">No lobbies yet</div><div>Open the Civ 7 wireless lobby on the Switch 2, then Scan.</div></div>
       </div>
-      <button class="btn primary lg block" id="ldnSend" disabled style="margin-top:16px">Send RemoteJSLoader</button>
+      <div class="row2" style="margin-top:16px">
+        <button class="btn primary lg" id="ldnSend" disabled>Send RemoteJSLoader</button>
+        <button class="btn lg" id="ldnTest" disabled>Send test chat</button>
+      </div>
       <div class="muted" id="ldnWeb" style="font-size:12.5px;margin-top:10px;display:flex;align-items:center;gap:8px"><span class="dot ok"></span>Web server running</div>
     </div>
 
@@ -174,6 +203,49 @@
         <li><b>Send RemoteJSLoader</b> to push the payload into the lobby chat.</li>
       </ol>
       <p class="explain">The Switch 1 joins over local wireless using the native <span class="mono">ldn</span> service — no cable, no <span class="mono">prod.keys</span>. The web server pauses while LDN owns the Wi-Fi and comes back when you Stop.</p>
+    </div>
+  </div>
+</main>
+
+<!-- ============ JS PAYLOAD ============ -->
+<main class="wrap hidden" id="tab-js">
+  <div class="ldnbanner" id="jsBanner">
+    <span class="ldnspin" id="jsSpin"></span>
+    <span class="dot" id="jsDot"></span>
+    <div style="flex:1;min-width:0">
+      <div class="ldnphase" id="jsPhase">IDLE</div>
+      <div class="muted" id="jsStatus" style="font-size:13.5px">Idle</div>
+    </div>
+    <button class="btn ghost hidden" id="jsReset">Forget loader</button>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h2>JS payloads <span class="muted" style="margin-left:auto;letter-spacing:0;text-transform:none;font-weight:400"><button class="link" id="jsRefresh">Refresh</button></span></h2>
+      <div class="files" id="jsList">
+        <div class="empty"><div class="big">No .js payloads</div><div>Upload a .js file below, then send it to the loaded Switch 2.</div></div>
+      </div>
+      <button class="btn primary lg block" id="jsScan" style="margin-top:16px">Find loader on Wi-Fi</button>
+
+      <div class="drop" id="jsDrop" style="margin-top:16px">
+        <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#8fc1ff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V4M8 8l4-4 4 4M5 15v3a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-3"/></svg></div>
+        <div>
+          <div><b>Drop a .js payload</b> or <button id="jsBrowse" class="link">browse</button></div>
+          <div class="muted" style="font-size:13px">Saved to /switch/C7S-Loader alongside your .C7S scripts.</div>
+          <div id="jsUploadMsg" class="msg"></div>
+        </div>
+      </div>
+      <input id="jsFile" type="file" accept=".js,text/javascript,application/javascript" hidden>
+    </div>
+
+    <div class="card col">
+      <h2>How it works</h2>
+      <ol class="steps">
+        <li>First inject <b>RemoteJSLoader</b> over <b>LDN</b> (the LDN tab). That opens a JS server on the Switch 2.</li>
+        <li>Come back to Wi-Fi, then <b>Find loader</b> — it scans the local network for the Switch 2 on port <span class="mono">9026</span>.</li>
+        <li><b>Send</b> a .js payload (e.g. the save-file installer). The loader evaluates it and reports back.</li>
+      </ol>
+      <p class="explain">These are <span class="mono">special scripts</span> — raw JavaScript pushed straight to the running loader over Wi-Fi, not LDN chat. The loader replies <span class="mono">Executed successfully</span> on success.</p>
     </div>
   </div>
 </main>

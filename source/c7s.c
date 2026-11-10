@@ -10,7 +10,7 @@ static const char *base_name(const char *path) {
     return slash ? slash + 1 : path;
 }
 
-bool c7s_name_ok(const char *name) {
+static bool name_safe(const char *name) {
     if (!name || !name[0]) return false;
     size_t len = strlen(name);
     if (len >= 120) return false;
@@ -21,9 +21,21 @@ bool c7s_name_ok(const char *name) {
         if (c == '/' || c == '\\' || c == ':') return false;
     }
     if (strstr(name, "..")) return false;
+    return true;
+}
+
+bool c7s_name_ok(const char *name) {
+    if (!name_safe(name)) return false;
+    const char *dot = strrchr(name, '.');
+    return dot && strcasecmp(dot, ".c7s") == 0;
+}
+
+/* Upload also accepts standalone .js payloads (stored next to the .C7S). */
+bool c7s_upload_name_ok(const char *name) {
+    if (!name_safe(name)) return false;
     const char *dot = strrchr(name, '.');
     if (!dot) return false;
-    return strcasecmp(dot, ".c7s") == 0;
+    return strcasecmp(dot, ".c7s") == 0 || strcasecmp(dot, ".js") == 0;
 }
 
 static bool is_end_marker(const char *line) {
@@ -35,18 +47,68 @@ static bool is_end_marker(const char *line) {
     return true;
 }
 
-static bool parse_header(const char *line, char *title, size_t title_size, int *count) {
-    const char *sep = NULL;
-    for (const char *p = line; (p = strstr(p, " - ")) != NULL; p += 3) sep = p;
-    if (!sep) return false;
-    size_t len = (size_t)(sep - line);
-    if (len == 0 || len >= title_size) return false;
-    int n = atoi(sep + 3);
-    if (n <= 0) return false;
-    memcpy(title, line, len);
-    title[len] = '\0';
-    *count = n;
-    return true;
+static void rtrim(char *s) {
+    size_t n = strlen(s);
+    while (n > 0 && (s[n - 1] == ' ' || s[n - 1] == '\t')) s[--n] = '\0';
+}
+
+/* Header line:  <Title> - <Type>[ - <Type2>] - desc:"<description>"
+ * Fields separated by " - ". Type tokens (case-insensitive): Text, Civ7LDN,
+ * Script. desc:"..." may sit anywhere and may itself contain " - " inside the
+ * quotes. Unknown fields are ignored. Fills title + desc and returns the type
+ * bitmask (0 if none recognised). */
+static int parse_header(const char *line, char *title, size_t title_size,
+                        char *desc, size_t desc_size) {
+    title[0] = '\0';
+    desc[0] = '\0';
+
+    char work[512];
+    snprintf(work, sizeof(work), "%s", line);
+
+    /* Extract desc:"..." first, since its value can contain " - ". */
+    char *d = strstr(work, "desc:\"");
+    if (d) {
+        char *v = d + 6;
+        char *endq = strchr(v, '"');
+        size_t dl = endq ? (size_t)(endq - v) : strlen(v);
+        if (dl >= desc_size) dl = desc_size - 1;
+        memcpy(desc, v, dl);
+        desc[dl] = '\0';
+        char *cut = d;                                   /* drop the whole field */
+        if (cut - work >= 3 && strncmp(cut - 3, " - ", 3) == 0) cut -= 3;
+        *cut = '\0';
+    }
+
+    int types = 0;
+    char *p = work;
+    char *sep = strstr(p, " - ");
+    if (!sep) {                                          /* title only */
+        snprintf(title, title_size, "%s", p);
+        rtrim(title);
+        return 0;
+    }
+    size_t tl = (size_t)(sep - p);
+    if (tl >= title_size) tl = title_size - 1;
+    memcpy(title, p, tl);
+    title[tl] = '\0';
+    rtrim(title);
+
+    for (p = sep + 3; p && *p;) {
+        char *next = strstr(p, " - ");
+        size_t fl = next ? (size_t)(next - p) : strlen(p);
+        char tok[64];
+        if (fl >= sizeof(tok)) fl = sizeof(tok) - 1;
+        memcpy(tok, p, fl);
+        tok[fl] = '\0';
+        rtrim(tok);
+        if (strcasecmp(tok, "Text") == 0) types |= C7S_TYPE_TEXT;
+        else if (strcasecmp(tok, "Civ7LDN") == 0) types |= C7S_TYPE_CIV7LDN;
+        else if (strcasecmp(tok, "Script") == 0) types |= C7S_TYPE_SCRIPT;
+        else if (strcasecmp(tok, "JS Payload") == 0) types |= C7S_TYPE_JS;
+        if (!next) break;
+        p = next + 3;
+    }
+    return types;
 }
 
 bool c7s_parse_file(const char *path, C7sPayload *out) {
@@ -120,7 +182,9 @@ bool c7s_parse_file(const char *path, C7sPayload *out) {
 
     int first_body = 0;
     if (raw_count >= 2 && strcmp(raw[1], C7S_SEPARATOR) == 0) {
-        out->header_valid = parse_header(raw[0], out->title, sizeof(out->title), &out->declared_count);
+        out->types = parse_header(raw[0], out->title, sizeof(out->title),
+                                  out->desc, sizeof(out->desc));
+        out->header_valid = true;   /* has the <header>/---BEGIN--- structure */
         first_body = 2;
     } else {
         out->header_valid = false;
@@ -149,15 +213,13 @@ bool c7s_parse_file(const char *path, C7sPayload *out) {
 
     out->lines = lines;
     out->line_count = n;
-    if (out->header_valid && out->declared_count != out->line_count) out->count_mismatch = true;
 
-    out->script = out->line_count > 0 && out->lines[0][0] == '@';
-    out->plain = true;
-    if (out->script) out->plain = false;
-    if (out->header_valid && strstr(out->title, "Remote JS") != NULL) out->plain = false;
-    if (out->line_count > 0 &&
-        (strstr(out->lines[0], "onerror") != NULL || strstr(out->lines[0], "p=window.p") != NULL)) {
-        out->plain = false;
+    /* Types come from the header. If the header declared none (legacy or
+     * malformed file), fall back to a body sniff so the file is still usable:
+     * a @-prefixed first line is a Script, otherwise Text. */
+    if (out->types == 0) {
+        if (out->line_count > 0 && out->lines[0][0] == '@') out->types = C7S_TYPE_SCRIPT;
+        else if (out->line_count > 0) out->types = C7S_TYPE_TEXT;
     }
     return true;
 }

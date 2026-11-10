@@ -20,11 +20,17 @@ int ldn_route_scan(void);
 int ldn_route_scan_count(void);
 const LdnLobbyInfo *ldn_route_scan_item(int index);
 int ldn_route_join(int index);
+bool ldn_route_set_payload(const char *filename); /* pick the Civ7LDN .C7S to inject */
+const char *ldn_route_payload_name(void);
+int ldn_route_payload_lines(void);
 void ldn_route_send_loader(void);
+void ldn_route_send_test(void);
+void ldn_route_send_chat(const char *text);        /* send one chat line (typed) */
 void ldn_route_stop(void);
 void ldn_route_start(void);
 void ldn_route_shutdown(void);
 bool ldn_route_active(void);
 bool ldn_route_connected(void);
+bool ldn_route_loader_sent(void);
 const char *ldn_route_status(void);
 const char *ldn_route_log(void);

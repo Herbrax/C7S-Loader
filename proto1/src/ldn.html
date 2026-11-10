@@ -1,0 +1,218 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>C7S-Loader LDN mockup</title>
+<style>
+@font-face { font-family: Noto; src: url(../../assets/fonts/NotoSans-Regular.ttf); font-weight: 400; }
+@font-face { font-family: Noto; src: url(../../assets/fonts/NotoSans-SemiBold.ttf); font-weight: 600; }
+@font-face { font-family: Plex; src: url(../../assets/fonts/IBMPlexMono-Medium.ttf); }
+
+:root {
+  --bg: #0b1220; --panel: #121a2b; --panel2: #19233a; --panel3: #212d48;
+  --line: #26324d; --line2: #33415f;
+  --text: #e8edf5; --muted: #8e9ab3; --dim: #5d6a86;
+  --accent: #2f8cff; --accent-bg: #173462;
+  --gold: #d9b65e; --ok: #3ccf91; --warn: #ffc440; --err: #ff6b6b; --red: #e32636;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { width: 1920px; height: 1080px; overflow: hidden; background: var(--bg); }
+body { font-family: Noto; color: var(--text); position: relative; }
+.mono { font-family: Plex; }
+.b { font-weight: 600; }
+.muted { color: var(--muted); }
+
+/* ---------- top bar ---------- */
+.top { position: absolute; left: 0; top: 0; width: 1920px; height: 112px; display: flex; align-items: center; padding: 0 36px; border-bottom: 1.5px solid var(--line); background: var(--bg); }
+.wordmark { font-family: Plex; font-size: 46px; letter-spacing: -1px; width: 420px; }
+.wordmark span { color: var(--gold); }
+.tabs { flex: 1; display: flex; justify-content: center; align-items: center; gap: 14px; }
+.tab { font-size: 32px; font-weight: 600; color: var(--muted); padding: 14px 34px; border-radius: 999px; display: flex; align-items: center; gap: 14px; }
+.tab.on { color: var(--text); background: var(--panel3); box-shadow: inset 0 0 0 2px var(--line2); }
+.tab .ico { width: 30px; height: 30px; }
+.status { width: 420px; display: flex; justify-content: flex-end; gap: 12px; }
+.chip { display: flex; align-items: center; gap: 12px; height: 48px; padding: 0 20px; border-radius: 24px; background: var(--panel2); box-shadow: inset 0 0 0 1.5px var(--line); font-size: 24px; font-weight: 600; white-space: nowrap; }
+.dot { width: 14px; height: 14px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 5px rgba(60,207,145,.18); }
+.dot.warn { background: var(--warn); box-shadow: 0 0 0 5px rgba(255,196,64,.18); }
+.dot.err { background: var(--err); box-shadow: 0 0 0 5px rgba(255,107,107,.18); }
+
+/* ---------- button glyphs ---------- */
+.g { display: inline-flex; align-items: center; justify-content: center; width: 46px; height: 46px; border-radius: 50%; background: #e8edf5; color: #0b1220; font-weight: 600; font-size: 27px; flex: none; }
+.g.sm { width: 38px; height: 38px; font-size: 22px; }
+.g.pill { width: auto; min-width: 58px; padding: 0 12px; border-radius: 12px; height: 38px; font-size: 22px; }
+.g.dark { background: rgba(11,18,32,.25); color: #fff; }
+.g.a { background: var(--accent); color: #fff; }
+.g.b { background: var(--red); color: #fff; }
+.g.y { background: #ff7bbf; color: #2a0c1c; }
+.g.x { background: #ff9f40; color: #2a1500; }
+
+/* ---------- footer ---------- */
+.foot { position: absolute; left: 0; bottom: 0; width: 1920px; height: 92px; border-top: 1.5px solid var(--line); background: var(--panel); display: flex; align-items: center; padding: 0 36px; font-size: 28px; color: var(--muted); }
+.foot .left { flex: 1; display: flex; align-items: center; gap: 14px; }
+.foot .hints { display: flex; gap: 40px; }
+.hint { display: flex; align-items: center; gap: 14px; color: var(--text); }
+
+/* ---------- generic ---------- */
+.main { position: absolute; left: 36px; top: 136px; width: 1848px; height: 828px; }
+.panel { background: var(--panel); border-radius: 20px; box-shadow: inset 0 0 0 1.5px var(--line); position: absolute; }
+.label { font-size: 24px; font-weight: 600; letter-spacing: 2.5px; color: var(--muted); text-transform: uppercase; }
+.btn { display: flex; align-items: center; justify-content: center; gap: 16px; border-radius: 16px; font-size: 32px; font-weight: 600; background: var(--panel3); box-shadow: inset 0 0 0 2px var(--line2); position: absolute; }
+.btn.primary { background: var(--accent); box-shadow: 0 10px 30px rgba(47,140,255,.35); color: #fff; }
+.btn.focus { outline: 4px solid #fff; outline-offset: 6px; }
+
+/* ---------- stepper header ---------- */
+.step-circle { position: absolute; width: 64px; height: 64px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 30px; font-weight: 600; }
+.step-circle.done { background: var(--ok); color: #06251a; }
+.step-circle.cur  { background: var(--accent); color: #fff; box-shadow: 0 0 0 7px rgba(47,140,255,.18); }
+.step-circle.next { background: var(--panel2); color: var(--dim); box-shadow: inset 0 0 0 2px var(--line2); }
+.step-conn { position: absolute; height: 4px; border-radius: 2px; }
+.step-name { position: absolute; text-align: center; font-size: 25px; font-weight: 600; letter-spacing: 2px; }
+.step-sub  { position: absolute; text-align: center; font-size: 19px; font-weight: 600; letter-spacing: 2px; text-transform: uppercase; }
+.divider { position: absolute; height: 1.5px; background: var(--line); }
+
+/* ---------- lists ---------- */
+.lrow { position: absolute; height: 104px; border-radius: 16px; display: flex; align-items: center; padding: 0 30px; gap: 26px; background: var(--panel2); box-shadow: inset 0 0 0 1.5px var(--line); }
+.lrow.sel { background: var(--accent-bg); box-shadow: inset 0 0 0 3px var(--accent); }
+.lrow .sdot { width: 18px; height: 18px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 5px rgba(60,207,145,.16); flex: none; }
+.lrow .nm { font-size: 32px; font-weight: 600; }
+.lrow .nm.mono { font-family: Plex; font-size: 30px; }
+.lrow .cap { font-size: 22px; color: var(--muted); margin-top: 3px; }
+.lrow .join { margin-left: auto; display: flex; align-items: center; gap: 14px; font-size: 25px; font-weight: 600; color: #bcd6ff; }
+.fileico { width: 56px; height: 56px; border-radius: 14px; background: rgba(60,207,145,.14); display: flex; align-items: center; justify-content: center; flex: none; }
+.empty { position: absolute; left: 76px; right: 76px; top: 430px; text-align: center; color: var(--muted); font-size: 30px; line-height: 1.5; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+const P = new URLSearchParams(location.search);
+const S = P.get("s") || "network";               // network | payload | injected
+const CUR = { network: 0, payload: 1, injected: 2 }[S] ?? 0;
+const app = document.getElementById("app");
+const h = (html) => app.insertAdjacentHTML("beforeend", html);
+
+const NET = "Civ7-SW2-A1B2";
+const PAYLOAD = "CIV7-RemoteJSLoader.C7S";
+
+const IC = {
+  send: '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12h13M12 5l7 7-7 7"/></svg>',
+  live: '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><rect x="2.5" y="6" width="19" height="12" rx="3"/><path d="M6.5 10h1M10 10h1M13.5 10h1M17 10h1M8 14h8"/></svg>',
+  ldn: '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M2 9a15 15 0 0 1 20 0M5.5 12.5a10 10 0 0 1 13 0M9 16a5 5 0 0 1 6 0"/><circle cx="12" cy="19.5" r="1.2" fill="currentColor"/></svg>',
+  connect: '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"><path d="M9 7 4 12l5 5M15 7l5 5-5 5"/></svg>',
+  file: '<svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#7ee6b8" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"><path d="M8 5 3 12l5 7M16 5l5 7-5 7"/></svg>',
+};
+
+function topbar() {
+  const tab = (id, label) => `<div class="tab ${S !== "x" && id === "ldn" ? "on" : ""}">${IC[id]}${label}</div>`;
+  h(`<div class="top">
+    <div class="wordmark">C7S<span>-Loader</span></div>
+    <div class="tabs"><span class="g pill">L</span>${tab("send","Send")}${tab("live","Live")}${tab("ldn","LDN")}${tab("connect","Connect")}<span class="g pill">R</span></div>
+    <div class="status"><div class="chip"><span class="dot"></span>LDN ready</div></div>
+  </div>`);
+}
+
+function foot(hints) {
+  const hs = hints.map(([g, t, cls]) => `<div class="hint">${g.length > 1 ? `<span class="g pill">${g}</span>` : `<span class="g sm ${cls||""}">${g}</span>`}${t}</div>`).join("");
+  h(`<div class="foot"><div class="left"><span class="g pill">+</span> Hold to exit</div><div class="hints">${hs}</div></div>`);
+}
+
+/* ---------- shared stepper header ---------- */
+function stepper() {
+  const C = [300, 960, 1620];          // circle centres (x)
+  const CY = 150, D = 64;              // circle top y, diameter -> centre y = 182
+  const STEPS = ["NETWORK", "PAYLOAD", "INJECTED"];
+  let out = `<div class="main"><div class="panel" style="left:0;top:0;width:1848px;height:828px"></div>`;
+  // relative to .main, so subtract left:36 top:136 from absolute. We build inside .main.
+  // connectors
+  for (let i = 0; i < 2; i++) {
+    const x1 = C[i] - 36 + 44, x2 = C[i+1] - 36 - 44;
+    const col = i < CUR ? "var(--ok)" : "var(--line2)";
+    out += `<div class="step-conn" style="left:${x1}px;top:${182-136-2}px;width:${x2-x1}px;background:${col}"></div>`;
+  }
+  for (let i = 0; i < 3; i++) {
+    const st = i < CUR ? "done" : i === CUR ? "cur" : "next";
+    const cx = C[i] - 36;
+    out += `<div class="step-circle ${st}" style="left:${cx-32}px;top:${CY-136}px">${i < CUR ? "✓" : (i+1)}</div>`;
+    const nameCol = i < CUR ? "var(--ok)" : i === CUR ? "var(--text)" : "var(--muted)";
+    const subCol  = i < CUR ? "var(--ok)" : i === CUR ? "var(--accent)" : "var(--dim)";
+    const sub = i < CUR ? "DONE" : i === CUR ? "CURRENT" : "NEXT";
+    out += `<div class="step-name" style="left:${cx-200}px;top:${242-136}px;width:400px;color:${nameCol}">${STEPS[i]}</div>`;
+    out += `<div class="step-sub"  style="left:${cx-200}px;top:${276-136}px;width:400px;color:${subCol}">${sub}</div>`;
+  }
+  // divider under stepper (absolute y=330 -> relative 330-136=194)
+  out += `<div class="divider" style="left:44px;top:194px;width:1760px"></div>`;
+  return out; // caller closes .main
+}
+
+/* ---------- step 1: NETWORK ---------- */
+function network() {
+  let s = stepper();
+  const NETS = [NET, "CIVILIZATION VII"];
+  s += `<div class="label" style="position:absolute;left:80px;top:${392-136}px">CIV 7 WIRELESS LOBBIES</div>`;
+  // scan button (accent) top-right
+  s += `<div class="btn primary" style="left:${1520-36}px;top:${376-136}px;width:304px;height:64px;font-size:28px;border-radius:14px"><span class="g sm y">Y</span>Scan</div>`;
+  // rows
+  NETS.forEach((n, i) => {
+    const sel = i === 0;
+    const y = 468 - 136 + i * 120;
+    s += `<div class="lrow ${sel?"sel":""}" style="left:80px;top:${y}px;width:1760px">
+        <div class="sdot"></div>
+        <div class="nm mono">${n}</div>
+        ${sel ? '<div class="join"><span class="g sm a">A</span>Join</div>' : ''}
+      </div>`;
+  });
+  // hint line
+  s += `<div style="position:absolute;left:80px;top:${720-136}px;font-size:23px;color:var(--dim)">Only lobbies with players are shown. Select with the D-pad, press A to join.</div>`;
+  // focal primary button bottom
+  s += `<div class="btn primary focus" style="left:${640-36}px;top:${852-136}px;width:640px;height:72px"><span class="g dark">A</span>Join  ${NET}</div>`;
+  s += `</div>`;
+  h(s);
+  foot([["Up/Dn","Select"],["Y","Scan","y"],["A","Join","a"],["B","Back","b"]]);
+}
+
+/* ---------- step 2: PAYLOAD ---------- */
+function payload() {
+  let s = stepper();
+  const FILES = ["CIV7-RemoteJSLoader.C7S", "CIV7-Reach-Chat-Input.C7S"];
+  const CAPS  = ["Pushes a JS server into Civ 7", "Sends a line to Civ 7 chat"];
+  s += `<div class="label" style="position:absolute;left:80px;top:${392-136}px">LOADER PAYLOADS ON SD CARD</div>`;
+  s += `<div class="muted" style="position:absolute;left:${1620-36}px;top:${394-136}px;font-size:24px;width:220px;text-align:right">2 files</div>`;
+  FILES.forEach((n, i) => {
+    const sel = i === 0;
+    const y = 468 - 136 + i * 120;
+    s += `<div class="lrow ${sel?"sel":""}" style="left:80px;top:${y}px;width:1760px">
+        <div class="fileico">${IC.file}</div>
+        <div><div class="nm mono">${n}</div><div class="cap">${CAPS[i]}</div></div>
+      </div>`;
+  });
+  s += `<div style="position:absolute;left:80px;top:${720-136}px;font-size:23px;color:var(--dim)">Tip: use TEST CHAT to confirm the lobby connection before you inject.</div>`;
+  // secondary TEST CHAT + primary INJECT
+  s += `<div class="btn" style="left:${466-36}px;top:${852-136}px;width:320px;height:72px;font-size:30px"><span class="g sm x">X</span>Test chat</div>`;
+  s += `<div class="btn primary focus" style="left:${814-36}px;top:${852-136}px;width:640px;height:72px"><span class="g dark">A</span>Inject  ${PAYLOAD}</div>`;
+  s += `</div>`;
+  h(s);
+  foot([["Up/Dn","Select"],["X","Test chat","x"],["A","Inject","a"],["B","Back","b"]]);
+}
+
+/* ---------- step 3: INJECTED ---------- */
+function injected() {
+  let s = stepper();
+  // big green check, centred (absolute cx=960)
+  s += `<div style="position:absolute;left:${960-80-36}px;top:${412-136}px;width:160px;height:160px;border-radius:50%;background:rgba(60,207,145,.16);display:flex;align-items:center;justify-content:center">
+      <svg width="92" height="92" viewBox="0 0 24 24" fill="none" stroke="#3ccf91" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg></div>`;
+  s += `<div style="position:absolute;left:${960-500-36}px;top:${600-136}px;width:1000px;text-align:center;font-size:52px;font-weight:600">RemoteJSLoader injected</div>`;
+  s += `<div style="position:absolute;left:${960-520-36}px;top:${672-136}px;width:1040px;text-align:center;font-size:28px;color:var(--muted);line-height:1.5">The Switch 2 is now running a JavaScript server inside Civ 7.<br>Open the <b style="color:var(--text)">JS Payload</b> tab to push code to it.</div>`;
+  s += `<div class="btn primary focus" style="left:${960-280-36}px;top:${808-136}px;width:560px;height:80px;font-size:34px"><span class="g dark">A</span>Go to JS payload  ›</div>`;
+  s += `</div>`;
+  h(s);
+  foot([["A","Go to JS payload","a"],["B","Back","b"]]);
+}
+
+/* ---------- render ---------- */
+topbar();
+if (S === "payload") payload();
+else if (S === "injected") injected();
+else network();
+</script>
+</body>
+</html>

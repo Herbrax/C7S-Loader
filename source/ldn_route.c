@@ -15,8 +15,8 @@
 #include <unistd.h>
 
 #include "app.h"
+#include "c7s.h"
 #include "httpd.h"
-#include "ldn_data.h"
 #include "settings.h"
 #include "switch_init.h"
 
@@ -37,7 +37,15 @@ static bool g_ldn_inited;
 static bool g_station_open;
 static bool g_connected;
 static volatile bool g_stop;
-static volatile bool g_send_requested;
+static volatile bool g_send_requested;  /* send the selected payload's lines */
+static volatile bool g_send_test;       /* send a single typed/test chat line */
+static volatile bool g_loader_sent;     /* a loader payload has been injected */
+/* The Civ7LDN .C7S whose body lines get injected, chosen in the LDN tab. */
+static pthread_mutex_t g_payload_lock = PTHREAD_MUTEX_INITIALIZER;
+static C7sPayload g_payload;
+static bool g_payload_ok;
+static char g_payload_name[128];
+static char g_test_line[512] = "Civ7-LDN-Hello";
 static volatile int g_lobby_sock = -1;
 static LdnNetworkInfo g_nets[24];
 static LdnLobbyInfo g_infos[24];
@@ -107,12 +115,16 @@ static u32 ip_u32(const LdnIpv4Address *addr) {
     return addr->addr;
 }
 
-/* Civ 7 uses the IPv4 bytes in reverse order inside the game payload. */
+/* Civ 7's LDN frames carry the IPv4 address as the raw little-endian bytes of
+ * LdnIpv4Address.addr (CivSwitchLDN protocol: "All fields are LE"). The
+ * reference matches replies with memcmp(reply, &local.addr, 4), so we must
+ * emit/compare LSB-first -- big-endian here made transport_receive reject
+ * every host reply (stuck at FireCONN 3/3). */
 static void ip_bytes(u32 ip, u8 out[4]) {
-    out[0] = (u8)(ip >> 24);
-    out[1] = (u8)(ip >> 16);
-    out[2] = (u8)(ip >> 8);
-    out[3] = (u8)ip;
+    out[0] = (u8)ip;
+    out[1] = (u8)(ip >> 8);
+    out[2] = (u8)(ip >> 16);
+    out[3] = (u8)(ip >> 24);
 }
 
 static u32 rd32(const u8 *p) {
@@ -156,12 +168,13 @@ typedef struct {
     Transport t;
     u32 local_ip;
     u32 host_ip;
-    Follow follow[32];
+    Follow follow[1024];   /* join (3) + up to ~1000 chat lines */
     int follow_n;
     int slot;
     bool joined;
     int received;
     int chat_sent;
+    int chat_total;   /* lines queued in the current send batch */
     u8 welcome[512];
     size_t welcome_len;
     bool welcome_seen;
@@ -328,27 +341,25 @@ static size_t text_block(u8 *out, const char *text, bool allow_empty) {
     return 64;
 }
 
-static size_t intro_build(u8 *out) {
+static size_t connection_payload(u8 *out, u32 host_ip) {
+    /* FireCONN frame body, byte-for-byte as civswitch-ldn-nx introduction()
+     * (CivSwitchLDN protocol.py; all fields little-endian). The leading 8
+     * bytes are the transport sequence (=0 for the initial frame): our 'F'
+     * transport carries the sequence as the first 8 bytes of the body.
+     * Layout: [8 seq][8 magic][4 hostIP][12 zero][64 name][64 name][u32 6][1][u32 0].
+     * Was [4 hostIP][8 zero][name="Civ7-PC"] -- 4 bytes short and wrong name,
+     * so the host saw a misaligned intro and refused after FireCONN. */
+    static const u8 CONN[8] = {0x4e, 0x4e, 0x4f, 0x43, 0x65, 0x72, 0x69, 0x46}; /* "FireCONN" LE */
     size_t n = 0;
-    wr32(out + n, 0); n += 4;
-    memset(out + n, 0, 64); memcpy(out + n, "Civ7-PC", 7); n += 64;
-    memset(out + n, 0, 64); memcpy(out + n, "Civ7-PC", 7); n += 64;
+    memset(out + n, 0, 8); n += 8;    /* sequence = 0 */
+    memcpy(out + n, CONN, 8); n += 8; /* magic */
+    ip_bytes(host_ip, out + n); n += 4;
+    memset(out + n, 0, 12); n += 12;
+    memset(out + n, 0, 64); memcpy(out + n, "CivSwitch-LDN-NX", 15); n += 64;
+    memset(out + n, 0, 64); memcpy(out + n, "CivSwitch-LDN-NX", 15); n += 64;
     wr32(out + n, 6); n += 4;
     out[n++] = 0;
     wr32(out + n, 0); n += 4;
-    return n;
-}
-
-static size_t connection_payload(u8 *out, u32 host_ip) {
-    static const u8 CONN[8] = {0x4e, 0x4e, 0x4f, 0x43, 0x65, 0x72, 0x69, 0x46};
-    size_t n = 0;
-    memset(out, 0, 8); n += 8; /* sequence */
-    memcpy(out + n, CONN, 8); n += 8;
-    ip_bytes(host_ip, out + n); n += 4;
-    memset(out + n, 0, 4); n += 4;
-    n += intro_build(out + n);
-    wr32(out, 0);
-    (void)host_ip;
     return n;
 }
 
@@ -398,13 +409,22 @@ static size_t net_chat(u8 *out, u32 counter, const char *text, int slot) {
 }
 
 static void lobby_build(const Lobby *l, int kind, int index, u8 *out, size_t *len) {
+    /* The message counter is 0-indexed (NetRegister=0, AppRegister=1,
+     * Snapshot=2, chat=3..), one less than the transport sequence this packet
+     * is about to take (civswitch-ldn-nx: next_counter = next_sequence - 1). */
+    u32 counter = (u32)(l->t.next_seq - 1);
     switch (kind) {
-        case 1: *len = net_register(out, (u32)l->t.next_seq); break;
-        case 2: *len = net_app_register(out, (u32)l->t.next_seq, l->slot); break;
-        case 3: *len = net_snapshot(out, (u32)l->t.next_seq); break;
-        case 4:
-            *len = net_chat(out, (u32)l->t.next_seq,
-                            ldn_chat_lines[index] ? ldn_chat_lines[index] : "", l->slot);
+        case 1: *len = net_register(out, counter); break;
+        case 2: *len = net_app_register(out, counter, l->slot); break;
+        case 3: *len = net_snapshot(out, counter); break;
+        case 4: { /* one line of the selected Civ7LDN payload */
+            const char *txt = (g_payload_ok && index >= 0 && index < g_payload.line_count)
+                                  ? g_payload.lines[index] : "";
+            *len = net_chat(out, counter, txt, l->slot);
+            break;
+        }
+        case 5: /* single typed/test line */
+            *len = net_chat(out, counter, g_test_line, l->slot);
             break;
         default: *len = 0; break;
     }
@@ -415,7 +435,10 @@ static int send_raw(int sock, u32 host_ip, const u8 *data, size_t len) {
     memset(&dst, 0, sizeof(dst));
     dst.sin_family = AF_INET;
     dst.sin_port = htons(LDN_PORT);
-    dst.sin_addr.s_addr = host_ip;
+    /* LdnIpv4Address.addr is host byte order; the socket wants network order
+     * (same as civswitch-ldn-nx). Without htonl the bind/sendto target is a
+     * byte-swapped address that isn't on the LDN interface -> EADDRNOTAVAIL. */
+    dst.sin_addr.s_addr = htonl(host_ip);
     return (int)sendto(sock, data, len, 0, (struct sockaddr *)&dst, sizeof(dst));
 }
 
@@ -434,7 +457,10 @@ static bool is_refused(const u8 *body, size_t len) {
     return false;
 }
 
-static void schedule_lobby(Lobby *l, const u8 *welcome, size_t wlen) {
+/* Join only: NetRegister -> NetAppRegister -> Snapshot, like the reference's
+ * game_join. The chat is NOT sent here -- the connection is kept alive and the
+ * user chooses when to send the loader or a test line. */
+static void schedule_join(Lobby *l, const u8 *welcome, size_t wlen) {
     u32 slot = 1;
     if (wlen >= 44) slot = rd32(welcome + 40);
     l->slot = (int)slot;
@@ -445,11 +471,31 @@ static void schedule_lobby(Lobby *l, const u8 *welcome, size_t wlen) {
     l->follow[l->follow_n++] = (Follow){now + 100, 1, 0};
     l->follow[l->follow_n++] = (Follow){now + 200, 2, 0};
     l->follow[l->follow_n++] = (Follow){now + 400, 3, 0};
-    u64 chat = now + 500;
-    for (size_t i = 0; i < ldn_chat_line_count && l->follow_n < 32; i++) {
-        l->follow[l->follow_n++] = (Follow){chat + (u64)i * 10, 4, (int)i};
+    set_status("LDN: joined lobby (slot %d) -- send loader or test chat", l->slot);
+}
+
+/* Queue the chat. loader=true sends every line of the selected payload (kind
+ * 4); loader=false sends a single typed/test line (kind 5). From now, 10ms
+ * apart (like the reference's CHAT_DELAY). */
+static void schedule_chat(Lobby *l, bool loader) {
+    u64 now = mono_ms();
+    l->chat_sent = 0;
+    const int cap = (int)(sizeof(l->follow) / sizeof(l->follow[0]));
+    if (loader) {
+        int total = g_payload_ok ? g_payload.line_count : 0;
+        int n = 0;
+        for (int i = 0; i < total && l->follow_n < cap; i++) {
+            l->follow[l->follow_n++] = (Follow){now + (u64)i * 10, 4, i};
+            n++;
+        }
+        l->chat_total = n;
+        set_status("LDN: sending %s (%d lines)...",
+                   g_payload_name[0] ? g_payload_name : "payload", n);
+    } else {
+        if (l->follow_n < cap) l->follow[l->follow_n++] = (Follow){now, 5, 0};
+        l->chat_total = 1;
+        set_status("LDN: sending chat line...");
     }
-    set_status("joined lobby, slot %d, sending %u messages", l->slot, (unsigned)ldn_chat_line_count);
 }
 
 static bool lobby_run(Lobby *l, int sock, u32 host_ip) {
@@ -520,8 +566,24 @@ static bool lobby_run(Lobby *l, int sock, u32 host_ip) {
             }
         }
 
-        if (l->welcome_seen && g_send_requested && !l->joined) {
-            schedule_lobby(l, l->welcome, l->welcome_len);
+        /* Join (register/app/snapshot) the instant the welcome arrives, like
+         * civswitch-ldn-nx's game_join -- the host closes an idle connection,
+         * so we must not wait. The chat is held back until the user asks. */
+        if (l->welcome_seen && !l->joined) {
+            schedule_join(l, l->welcome, l->welcome_len);
+        }
+        /* Once joined and settled (join messages flushed), a Send request
+         * queues the chat. Stay connected afterwards so more sends work. */
+        if (l->joined && l->follow_n == 0) {
+            if (g_send_requested) {
+                g_send_requested = false;
+                g_send_test = false;
+                g_loader_sent = true;
+                schedule_chat(l, true);
+            } else if (g_send_test) {
+                g_send_test = false;
+                schedule_chat(l, false);
+            }
         }
         if (l->joined) {
             while (l->follow_n > 0 && l->follow[0].at <= mono_ms()) {
@@ -535,16 +597,14 @@ static bool lobby_run(Lobby *l, int sock, u32 host_ip) {
                 if (mlen && transport_queue(&l->t, msg, mlen)) {
                     Pkt *p = &l->t.sent[l->t.sent_n - 1];
                     send_raw(sock, host_ip, p->data, p->len);
-                    if (f.kind == 4) {
+                    if (f.kind == 4 || f.kind == 5) {
                         l->chat_sent++;
-                        set_status("LDN: %d/%u chat messages", l->chat_sent,
-                                   (unsigned)ldn_chat_line_count);
+                        if (l->follow_n == 0)
+                            set_status("LDN: sent %d chat line(s) -- check Switch 2", l->chat_sent);
+                        else
+                            set_status("LDN: sending %d/%d...", l->chat_sent, l->chat_total);
                     }
                 }
-            }
-            if (l->follow_n == 0 && l->chat_sent >= (int)ldn_chat_line_count) {
-                set_status("LDN: all %u chat messages sent", (unsigned)ldn_chat_line_count);
-                return true;
             }
         }
 
@@ -612,6 +672,8 @@ static int ldn_scan_all(void) {
     }
     g_stop = false;
     g_send_requested = false;
+    g_send_test = false;
+    g_loader_sent = false;
     g_connected = false;
 
     Result orc = ldnOpenStation();
@@ -729,6 +791,7 @@ int ldn_route_join(int index) {
     g_connected = true;
     g_stop = false;
     g_send_requested = false;
+    g_send_test = false;
 
     LdnLobbyArgs *args = calloc(1, sizeof(*args));
     if (!args) {
@@ -779,7 +842,9 @@ static void *ldn_lobby_worker(void *arg) {
     memset(&bind_addr, 0, sizeof(bind_addr));
     bind_addr.sin_family = AF_INET;
     bind_addr.sin_port = htons(LDN_PORT);
-    bind_addr.sin_addr.s_addr = a->local_ip;
+    /* Host -> network byte order for the socket (matches civswitch-ldn-nx).
+     * Binding the raw host-order LDN IP fails with EADDRNOTAVAIL (125). */
+    bind_addr.sin_addr.s_addr = htonl(a->local_ip);
     if (bind(sock, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) < 0) {
         set_status("LDN: UDP bind failed (%d)", errno);
         close(sock);
@@ -809,6 +874,7 @@ cleanup:
     g_connected = false;
     g_station_open = false;
     g_send_requested = false;
+    g_send_test = false;
     g_stop = false;
     g_active = false;
     char ip[64];
@@ -851,13 +917,11 @@ Result ldn_route_init(void) {
         set_status("LDN: connect same Wi-Fi/LAN as Switch 2, then relaunch");
         return MAKERESULT(Module_Libnx, LibnxError_NotInitialized);
     }
-    AppletType type = appletGetAppletType();
-    logf_("LDN: applet type=%d", (int)type);
-    if (type != AppletType_Application) {
-        logf_("LDN: app mode required; launch with R over a game");
-        set_status("LDN: launch in app mode (hold R over a game)");
-        return MAKERESULT(Module_Libnx, LibnxError_NotInitialized);
-    }
+    // Applet type is logged for diagnosis only. LDN does NOT require
+    // application mode -- civswitch-ldn-nx runs it fine from the album
+    // (applet mode), which also avoids the hold-R-over-Civ7 nacp dance. Do
+    // not gate on it.
+    logf_("LDN: applet type=%d", (int)appletGetAppletType());
     logf_("LDN: calling ldnInitialize at startup");
     Result rc = ldnInitialize(LdnServiceType_User);
     logf_("LDN: startup ldnInitialize rc=%08x", (unsigned)rc);
@@ -877,14 +941,50 @@ void ldn_route_start(void) {
     if (ldn_route_scan() > 0) ldn_route_join(0);
 }
 
-void ldn_route_send_loader(void) {
-    if (!g_active) {
-        set_status("LDN: register in a lobby first");
-        return;
+/* Choose which Civ7LDN .C7S (by file name under C7S_DIR) gets injected. */
+bool ldn_route_set_payload(const char *filename) {
+    pthread_mutex_lock(&g_payload_lock);
+    if (g_payload_ok) { c7s_free(&g_payload); g_payload_ok = false; }
+    g_payload_name[0] = '\0';
+    bool ok = false;
+    if (filename && filename[0]) {
+        char path[512];
+        snprintf(path, sizeof(path), "%s/%s", C7S_DIR, filename);
+        if (c7s_parse_file(path, &g_payload)) {
+            if (c7s_is_ldn(&g_payload) && g_payload.line_count > 0) {
+                g_payload_ok = true;
+                snprintf(g_payload_name, sizeof(g_payload_name), "%s", filename);
+                ok = true;
+            } else {
+                c7s_free(&g_payload);
+            }
+        }
     }
-    g_send_requested = true;
-    set_status("LDN: sending RemoteJSLoader...");
+    pthread_mutex_unlock(&g_payload_lock);
+    if (!ok && filename && filename[0]) set_status("LDN: %s is not a Civ7LDN payload", filename);
+    return ok;
 }
+
+const char *ldn_route_payload_name(void) { return g_payload_ok ? g_payload_name : ""; }
+int ldn_route_payload_lines(void) { return g_payload_ok ? g_payload.line_count : 0; }
+
+void ldn_route_send_loader(void) {
+    if (!g_active) { set_status("LDN: join a lobby first"); return; }
+    if (!g_payload_ok) { set_status("LDN: pick a Civ7LDN payload first"); return; }
+    g_send_requested = true;
+}
+
+/* Send one chat line. NULL/empty uses the built-in test string. */
+void ldn_route_send_chat(const char *text) {
+    if (!g_active) { set_status("LDN: join a lobby first"); return; }
+    pthread_mutex_lock(&g_payload_lock);
+    if (text && text[0]) snprintf(g_test_line, sizeof(g_test_line), "%s", text);
+    else snprintf(g_test_line, sizeof(g_test_line), "Civ7-LDN-Hello");
+    pthread_mutex_unlock(&g_payload_lock);
+    g_send_test = true;
+}
+
+void ldn_route_send_test(void) { ldn_route_send_chat(NULL); }
 
 static void close_lobby_socket(void) {
     int s = g_lobby_sock;
@@ -898,6 +998,7 @@ static void close_lobby_socket(void) {
 void ldn_route_stop(void) {
     g_stop = true;
     g_send_requested = false;
+    g_send_test = false;
     logf_("LDN: stop requested");
     close_lobby_socket();
     for (int i = 0; i < 150 && g_active; i++) svcSleepThread(20000000ull);
@@ -934,6 +1035,7 @@ bool ldn_route_active(void) {
     return a;
 }
 bool ldn_route_connected(void) { return g_connected; }
+bool ldn_route_loader_sent(void) { return g_loader_sent; }
 
 const char *ldn_route_status(void) {
     return g_status;
@@ -946,6 +1048,7 @@ const char *ldn_route_log(void) {
 void ldn_route_shutdown(void) {
     g_stop = true;
     g_send_requested = false;
+    g_send_test = false;
     close_lobby_socket();
     for (int i = 0; i < 150 && g_active; i++) svcSleepThread(20000000ull);
     if (g_lobby_thread_valid) {
@@ -967,4 +1070,8 @@ void ldn_route_shutdown(void) {
     g_active = false;
     g_scanning = false;
     g_net_count = 0;
+    pthread_mutex_lock(&g_payload_lock);
+    if (g_payload_ok) { c7s_free(&g_payload); g_payload_ok = false; }
+    g_payload_name[0] = '\0';
+    pthread_mutex_unlock(&g_payload_lock);
 }

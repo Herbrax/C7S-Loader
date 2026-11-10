@@ -5,10 +5,10 @@
 typedef struct {
     char name[128];
     char title[128];
-    int declared;
+    char desc[256];
+    int types;   /* bitmask of C7S_TYPE_* */
     int lines;
     bool header;
-    bool mismatch;
     long long size;
 } C7sEntry;
 

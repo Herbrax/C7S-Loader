@@ -20,6 +20,7 @@
 #include "c7s.h"
 #include "debuglog.h"
 #include "ldn_route.h"
+#include "remote_js.h"
 #include "live.h"
 #include "update.h"
 #include "settings.h"
@@ -137,14 +138,17 @@ static void add_meta(sb_t *b, const C7sPayload *p, long long size) {
     sb_add(b, p->header_valid ? "true" : "false");
     sb_add(b, ",\"title\":");
     sb_json(b, p->header_valid ? p->title : "");
-    sb_add(b, ",\"declared\":");
-    sb_addf(b, "%d", p->header_valid ? p->declared_count : 0);
+    sb_add(b, ",\"desc\":");
+    sb_json(b, p->desc);
     sb_add(b, ",\"lines\":");
     sb_addf(b, "%d", p->line_count);
-    sb_add(b, ",\"mismatch\":");
-    sb_add(b, p->count_mismatch ? "true" : "false");
-    sb_add(b, ",\"plain\":");
-    sb_add(b, p->plain ? "true" : "false");
+    /* type flags */
+    sb_add(b, ",\"text\":");
+    sb_add(b, c7s_is_text(p) ? "true" : "false");
+    sb_add(b, ",\"ldn\":");
+    sb_add(b, c7s_is_ldn(p) ? "true" : "false");
+    sb_add(b, ",\"script\":");
+    sb_add(b, c7s_is_script(p) ? "true" : "false");
 }
 
 typedef struct {
@@ -167,7 +171,7 @@ static void upload_open(struct MHD_Connection *conn, req_t *ctx) {
     ctx->is_update = 0;
     ctx->max = C7S_MAX_BYTES;
     ctx->fd = -1;
-    if (!c7s_name_ok(name)) {
+    if (!c7s_upload_name_ok(name)) {
         ctx->err = EINVAL;
         return;
     }
@@ -254,11 +258,24 @@ static enum MHD_Result upload_finish(struct MHD_Connection *conn, req_t *ctx) {
         return reply_error(conn, ctx->err == EINVAL ? 400 : 500, strerror(ctx->err));
     }
 
+    const char *fname = strrchr(ctx->final, '/') ? strrchr(ctx->final, '/') + 1 : ctx->final;
+    const char *fdot = strrchr(fname, '.');
+    if (fdot && strcasecmp(fdot, ".js") == 0) {
+        /* Standalone JS payload: no C7S header to parse. */
+        sb_t jb = {0};
+        sb_add(&jb, "{\"ok\":true,\"js\":true,\"name\":");
+        sb_json(&jb, fname);
+        sb_add(&jb, ",\"size\":");
+        sb_addf(&jb, "%llu", ctx->written);
+        sb_add(&jb, "}");
+        return reply_json(conn, 200, &jb);
+    }
+
     C7sPayload p;
     bool ok = c7s_parse_file(ctx->final, &p);
     sb_t b = {0};
     sb_add(&b, "{\"ok\":true,\"name\":");
-    sb_json(&b, strrchr(ctx->final, '/') ? strrchr(ctx->final, '/') + 1 : ctx->final);
+    sb_json(&b, fname);
     if (ok) {
         add_meta(&b, &p, (long long)ctx->written);
         c7s_free(&p);
@@ -617,6 +634,8 @@ static enum MHD_Result api_ldn(struct MHD_Connection *conn) {
             ldn_route_join(idx ? atoi(idx) : 0);
         } else if (!strcmp(action, "send")) {
             ldn_route_send_loader();
+        } else if (!strcmp(action, "test")) {
+            ldn_route_send_test();
         } else if (!strcmp(action, "stop")) {
             ldn_route_stop();
         }
@@ -644,6 +663,40 @@ static enum MHD_Result api_ldn(struct MHD_Connection *conn) {
                 (int)li->link_level, li->joinable ? "true" : "false");
         sb_json(&b, li->problem);
         sb_add(&b, "}");
+    }
+    sb_add(&b, "]}");
+    return reply_json(conn, 200, &b);
+}
+
+static enum MHD_Result api_js(struct MHD_Connection *conn) {
+    /* RemoteJS: scan the Wi-Fi for a loader on :9026, then push a .js file. */
+    const char *action = MHD_lookup_connection_value(conn, MHD_GET_ARGUMENT_KIND, "action");
+    if (action) {
+        if (!strcmp(action, "scan")) {
+            remote_js_scan();
+        } else if (!strcmp(action, "send")) {
+            const char *name = MHD_lookup_connection_value(conn, MHD_GET_ARGUMENT_KIND, "name");
+            if (name) remote_js_send(name);
+        } else if (!strcmp(action, "reset")) {
+            remote_js_reset();
+        }
+    }
+
+    sb_t b = {0};
+    sb_add(&b, "{\"ok\":true,\"phase\":");
+    sb_json(&b, remote_js_phase_name());
+    sb_add(&b, ",\"status\":");
+    sb_json(&b, remote_js_status());
+    sb_add(&b, ",\"busy\":");
+    sb_add(&b, remote_js_busy() ? "true" : "false");
+    sb_add(&b, ",\"loader\":");
+    sb_json(&b, remote_js_loader_ip_str());
+    sb_add(&b, ",\"files\":[");
+    char names[64][128];
+    int n = remote_js_list(names, 64);
+    for (int i = 0; i < n; i++) {
+        if (i) sb_add(&b, ",");
+        sb_json(&b, names[i]);
     }
     sb_add(&b, "]}");
     return reply_json(conn, 200, &b);
@@ -684,6 +737,8 @@ static enum MHD_Result dispatch(struct MHD_Connection *conn, const char *url, co
     if (get && !strcmp(url, "/api/download")) return api_download(conn);
     if (get && !strcmp(url, "/api/ldn")) return api_ldn(conn);
     if (post && !strcmp(url, "/api/ldn")) return api_ldn(conn);
+    if (get && !strcmp(url, "/api/js")) return api_js(conn);
+    if (post && !strcmp(url, "/api/js")) return api_js(conn);
     if (post && !strcmp(url, "/api/start")) return api_start(conn);
     if (post && !strcmp(url, "/api/cancel")) return api_cancel(conn);
     if (post && !strcmp(url, "/api/settings")) return api_settings(conn);

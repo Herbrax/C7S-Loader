@@ -34,14 +34,23 @@ async function jsonFetch(url, opts) {
 /* ---------- mode tags ----------
    The API exposes `plain` (text mode) and `title`, not the raw body, so script
    vs Civ 7 chat is derived from the title the way the loader names them. */
+// Types come from the file header (f.text / f.ldn / f.script). A file can
+// carry two; the primary mode (for the icon) is Script > Civ7LDN > Text.
 function modeOf(f) {
   if (f.error) return { key: "unknown", label: "UNREADABLE", cls: "b-unknown" };
-  if (f.plain) return { key: "text", label: "TEXT", cls: "b-text" };
-  // Only the RemoteJS payload is true Civ 7 chat mode; other non-plain files are
-  // recorded @-scripts. The API doesn't expose the body, so match on its name/title.
-  const t = (f.title || "") + " " + (f.name || "");
-  if (/remote\s*js/i.test(t)) return { key: "chat", label: "CIV 7 CHAT", cls: "b-chat" };
-  return { key: "script", label: "SCRIPT", cls: "b-script" };
+  if (f.script) return { key: "script", label: "Script", cls: "b-script" };
+  if (f.ldn) return { key: "chat", label: "Civ 7 LDN", cls: "b-chat" };
+  if (f.text) return { key: "text", label: "Chat Payload", cls: "b-text" };
+  return { key: "unknown", label: "UNKNOWN", cls: "b-unknown" };
+}
+// Every type tag a file carries (shown together, same as the console).
+function modeTags(f) {
+  const out = [];
+  if (f.text) out.push({ label: "Chat Payload", cls: "b-text" });
+  if (f.ldn) out.push({ label: "Civ 7 LDN", cls: "b-chat" });
+  if (f.script) out.push({ label: "Script", cls: "b-script" });
+  if (!out.length) out.push({ label: f.error ? "UNREADABLE" : "UNKNOWN", cls: "b-unknown" });
+  return out;
 }
 function modeIcon(key) {
   if (key === "text") return '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#8fc1ff" stroke-width="2.2" stroke-linecap="round"><path d="M5 6h14M12 6v13M8 19h8"/></svg>';
@@ -77,7 +86,7 @@ function renderFiles() {
     row.innerHTML =
       `<div class="fi" style="background:${iconBg[m.key]}">${modeIcon(m.key)}</div>` +
       `<div class="fmid"><div class="nm">${esc(f.name)}</div><div class="mt">${esc(meta)}</div></div>` +
-      `<div class="right"><div class="sz"><span class="badge ${m.cls}">${m.label}</span> ${fmtSize(f.size)}</div>` +
+      `<div class="right"><div class="sz">${modeTags(f).map((t) => `<span class="badge ${t.cls}">${t.label}</span>`).join(" ")} ${fmtSize(f.size)}</div>` +
       `<a class="dl" href="/api/download?name=${encodeURIComponent(f.name)}" download="${esc(f.name)}">Download</a></div>`;
     row.querySelector(".dl").addEventListener("click", (e) => e.stopPropagation());
     row.addEventListener("click", () => selectFile(f.name));
@@ -121,13 +130,13 @@ function selectFile(name) {
   $("selEmpty").classList.add("hidden");
   $("selBody").classList.remove("hidden");
   const m = modeOf(f);
-  $("selBadge").innerHTML = `<span class="badge ${m.cls}">${m.label}</span>`;
+  $("selBadge").innerHTML = modeTags(f).map((t) => `<span class="badge ${t.cls}">${t.label}</span>`).join(" ");
   $("selName").textContent = f.name;
   const facts = [`<span><b>${f.lines}</b> lines</span>`, `<span><b>${fmtSize(f.size)}</b></span>`];
   if (f.header && f.title) facts.push(`<span>"${esc(f.title)}"</span>`);
   $("selFacts").innerHTML = facts.join("");
   const warn = $("selWarn");
-  if (f.mismatch) { warn.classList.remove("hidden"); warn.textContent = `Header says ${f.declared} lines but the file has ${f.lines}. It will still run.`; }
+  if (f.desc) { warn.classList.remove("hidden"); warn.textContent = f.desc; }
   else warn.classList.add("hidden");
   $("selExplain").textContent = modeExplain(m.key) + " A 5-second countdown gives you time to focus the target field on the Switch 2.";
   setMsg($("startMsg"), "", "");
@@ -138,15 +147,77 @@ function selectFile(name) {
 /* ---------- upload ---------- */
 async function upload(file) {
   if (!file) return;
-  if (!/\.c7s$/i.test(file.name)) { setMsg($("uploadMsg"), "Only .C7S files are accepted.", "err"); return; }
-  setMsg($("uploadMsg"), "Uploading " + file.name + "…", "");
+  if (/\.c7s$/i.test(file.name)) {
+    setMsg($("uploadMsg"), "Uploading " + file.name + "…", "");
+    try {
+      const data = await jsonFetch("/api/upload?name=" + encodeURIComponent(file.name), { method: "POST", body: file });
+      setMsg($("uploadMsg"), "Uploaded " + data.name + ".", "ok");
+      await refreshFiles();
+      selectFile(data.name);
+    } catch (e) {
+      setMsg($("uploadMsg"), "Upload failed: " + e.message, "err");
+    }
+    return;
+  }
+  // Any other (text) file -> open the converter.
+  const text = await file.text();
+  openConverter(file, text);
+}
+
+/* ---------- text -> .C7S converter ---------- */
+let convText = "";
+const CONV_LIMIT = 250;   // Civ 7 chat char budget per message
+const CONV_RESERVE = 10;  // room for the "i/N" progress prefix
+
+function convLineCount(len) {
+  return Math.max(1, Math.ceil(len / (CONV_LIMIT - CONV_RESERVE)));
+}
+function setConvSw(id, on) { $(id).classList.toggle("on", on); }
+function convUpdateInfo() {
+  $("convInfo").textContent = `${convText.length} chars → ${convLineCount(convText.length)} chat line(s), ≤${CONV_LIMIT}/line`;
+}
+function openConverter(file, text) {
+  convText = text;
+  $("convSrc").textContent = "from " + file.name + " · " + fmtSize(text.length);
+  $("convTitle").value = (file.name || "Payload").replace(/\.[^.]+$/, "");
+  $("convDesc").value = "";
+  setConvSw("convLdnSw", true);
+  setConvSw("convTextSw", false);
+  convUpdateInfo();
+  setMsg($("convMsg"), "", "");
+  $("convCard").classList.remove("hidden");
+  $("convCard").scrollIntoView({ behavior: "smooth", block: "center" });
+}
+function buildC7S(title, desc, types, text) {
+  const size = CONV_LIMIT - CONV_RESERVE;
+  const body = text.replace(/\r\n/g, "\n").replace(/\n+$/, "");
+  const chunks = [];
+  for (let i = 0; i < body.length; i += size) chunks.push(body.slice(i, i + size));
+  if (!chunks.length) chunks.push("");
+  const N = chunks.length;
+  const lines = chunks.map((c, i) => `${i + 1}/${N}${c}`);
+  let header = `${title} - ${types.join(" - ")}`;
+  if (desc) header += ` - desc:"${desc.replace(/"/g, "'")}"`;
+  return [header, "---BEGIN---", ...lines, "---END---", ""].join("\n");
+}
+async function doConvert() {
+  const title = ($("convTitle").value || "Payload").trim();
+  const desc = $("convDesc").value.trim();
+  const types = [];
+  if ($("convLdnSw").classList.contains("on")) types.push("Civ7LDN");
+  if ($("convTextSw").classList.contains("on")) types.push("Text");
+  if (!types.length) { setMsg($("convMsg"), "Pick at least one format.", "err"); return; }
+  const c7s = buildC7S(title, desc, types, convText);
+  const name = (title.replace(/[^A-Za-z0-9 ._-]/g, "_").slice(0, 100) || "Payload") + ".C7S";
+  setMsg($("convMsg"), "Converting & uploading " + name + "…", "");
   try {
-    const data = await jsonFetch("/api/upload?name=" + encodeURIComponent(file.name), { method: "POST", body: file });
-    setMsg($("uploadMsg"), "Uploaded " + data.name + ".", "ok");
+    const data = await jsonFetch("/api/upload?name=" + encodeURIComponent(name), { method: "POST", body: c7s });
+    setMsg($("convMsg"), "Saved " + data.name + ".", "ok");
+    $("convCard").classList.add("hidden");
     await refreshFiles();
     selectFile(data.name);
   } catch (e) {
-    setMsg($("uploadMsg"), "Upload failed: " + e.message, "err");
+    setMsg($("convMsg"), "Upload failed: " + e.message, "err");
   }
 }
 
@@ -462,7 +533,7 @@ async function loadLive() {
 }
 
 /* ---------- tabs ---------- */
-const TABS = ["send", "live", "status", "ldn"];
+const TABS = ["send", "live", "status", "ldn", "js"];
 function switchTab(name) {
   if (!TABS.includes(name)) name = "send";
   if (name !== "live" && liveOn) enableLive(false);
@@ -477,6 +548,10 @@ function wire() {
   window.addEventListener("hashchange", () => switchTab(location.hash.slice(1)));
   $("browse").addEventListener("click", () => $("file").click());
   $("file").addEventListener("change", () => upload($("file").files[0]));
+  $("convLdnTog").addEventListener("click", () => $("convLdnSw").classList.toggle("on"));
+  $("convTextTog").addEventListener("click", () => $("convTextSw").classList.toggle("on"));
+  $("convGo").addEventListener("click", doConvert);
+  $("convCancel").addEventListener("click", () => $("convCard").classList.add("hidden"));
   $("refreshBtn").addEventListener("click", refreshFiles);
   $("startBtn").addEventListener("click", start);
   $("cancelBtn").addEventListener("click", cancel);
@@ -485,7 +560,17 @@ function wire() {
   $("ktestBtn").addEventListener("click", keyboardTest);
   $("ldnScan").addEventListener("click", () => ldnAction("scan"));
   $("ldnSend").addEventListener("click", () => ldnAction("send"));
+  $("ldnTest").addEventListener("click", () => ldnAction("test"));
   $("ldnStop").addEventListener("click", () => ldnAction("stop"));
+  $("jsScan").addEventListener("click", () => jsAction("scan"));
+  $("jsReset").addEventListener("click", () => jsAction("reset"));
+  $("jsRefresh").addEventListener("click", pollJs);
+  $("jsBrowse").addEventListener("click", () => $("jsFile").click());
+  $("jsFile").addEventListener("change", () => uploadJs($("jsFile").files[0]));
+  const jsd = $("jsDrop");
+  for (const ev of ["dragenter", "dragover"]) jsd.addEventListener(ev, (e) => { e.preventDefault(); jsd.classList.add("over"); });
+  for (const ev of ["dragleave", "drop"]) jsd.addEventListener(ev, (e) => { e.preventDefault(); jsd.classList.remove("over"); });
+  jsd.addEventListener("drop", (e) => uploadJs(e.dataTransfer.files && e.dataTransfer.files[0]));
   $("nroBrowse").addEventListener("click", () => $("nroFile").click());
   $("nroUpload").addEventListener("click", uploadUpdate);
   $("nroFile").addEventListener("change", () => {
@@ -531,7 +616,8 @@ function renderLdn(d) {
 
   const send = $("ldnSend");
   send.disabled = !connected;
-  send.textContent = connected ? "Send RemoteJSLoader" : "Register in a lobby first";
+  send.textContent = connected ? "Send RemoteJSLoader" : "Join a lobby first";
+  $("ldnTest").disabled = !connected;
 
   const web = $("ldnWeb");
   web.innerHTML = active
@@ -583,6 +669,71 @@ async function ldnAction(action) {
   setTimeout(pollLdn, 250);
 }
 
+/* ---------- JS Payload ----------
+   The injected RemoteJS loader runs a JS eval server on the Switch 2 at :9026.
+   We scan the local Wi-Fi for it and push raw .js files; it replies on success.
+   Unlike LDN this does NOT take the Wi-Fi, so the web server stays reachable. */
+let jsBusy = false;
+const CODE_ICON = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#7ee6b8" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 5 3 12l5 7M16 5l5 7-5 7"/></svg>';
+
+function renderJs(d) {
+  jsBusy = !!d.busy;
+  const phase = d.phase || "IDLE";
+  const banner = $("jsBanner");
+  let cls = "";
+  if (phase === "SCANNING" || phase === "SENDING") cls = "active busy";
+  else if (phase === "LOADER FOUND" || phase === "DONE") cls = "done";
+  else if (phase === "ERROR") cls = "active";
+  banner.className = "ldnbanner " + cls;
+  $("jsPhase").textContent = phase;
+  $("jsStatus").textContent = d.status || "Idle";
+  const haveLoader = !!(d.loader && d.loader.length);
+  $("jsDot").className = "dot" + (phase === "ERROR" ? " warn" : haveLoader ? " ok" : "");
+  $("jsReset").classList.toggle("hidden", !haveLoader);
+
+  const scan = $("jsScan");
+  scan.disabled = jsBusy;
+  scan.textContent = jsBusy && phase === "SCANNING" ? "Scanning…"
+    : haveLoader ? "Loader at " + d.loader + " — rescan" : "Find loader on Wi-Fi";
+
+  const list = $("jsList");
+  const names = d.files || [];
+  if (!names.length) {
+    list.innerHTML = '<div class="empty"><div class="big">No .js payloads</div><div>Upload a .js file below, then send it to the loaded Switch 2.</div></div>';
+    return;
+  }
+  list.innerHTML = names.map((n) => `<div class="file" data-n="${esc(n)}">
+      <div class="fi" style="background:rgba(47,140,255,.12)">${CODE_ICON}</div>
+      <div class="fmid"><div class="nm">${esc(n)}</div><div class="mt">JavaScript payload</div></div>
+      <div class="right"><button class="btn sm jsSend" data-n="${esc(n)}" ${jsBusy ? "disabled" : ""}>Send</button></div>
+    </div>`).join("");
+  for (const btn of list.querySelectorAll(".jsSend")) {
+    btn.addEventListener("click", (e) => { e.stopPropagation(); jsAction("send&name=" + encodeURIComponent(btn.dataset.n)); });
+  }
+}
+
+async function pollJs() {
+  try { renderJs(await jsonFetch("/api/js")); } catch (e) {}
+}
+
+async function jsAction(action) {
+  try { await jsonFetch("/api/js?action=" + action, { method: "POST" }); } catch (e) {}
+  setTimeout(pollJs, 200);
+}
+
+async function uploadJs(file) {
+  if (!file) return;
+  if (!/\.js$/i.test(file.name)) { setMsg($("jsUploadMsg"), "Pick a .js file", "err"); return; }
+  setMsg($("jsUploadMsg"), "Uploading " + file.name + "…", "");
+  try {
+    await jsonFetch("/api/upload?name=" + encodeURIComponent(file.name), { method: "POST", body: file });
+    setMsg($("jsUploadMsg"), "Saved " + file.name + " (" + fmtSize(file.size) + ")", "ok");
+    pollJs();
+  } catch (e) {
+    setMsg($("jsUploadMsg"), e.message || "Upload failed", "err");
+  }
+}
+
 async function boot() {
   wire();
   initLive();
@@ -596,5 +747,7 @@ async function boot() {
   setInterval(refreshDebug, 2000);
   pollLdn();
   setInterval(pollLdn, 1000);
+  pollJs();
+  setInterval(pollJs, 1500);
 }
 boot();

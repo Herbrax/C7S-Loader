@@ -25,4 +25,5 @@ void preload_payloads(void) {
     mkdir(C7S_DIR, 0777);
     write_if_missing("CIV7-RemoteJSLoader.C7S", c7s_preload_remote_js, c7s_preload_remote_js_len);
     write_if_missing("CIV7-Reach-Chat-Input.C7S", c7s_preload_reach_chat, c7s_preload_reach_chat_len);
+    write_if_missing("Civ7SaveInstaller.C7S", c7s_preload_save_installer, c7s_preload_save_installer_len);
 }
